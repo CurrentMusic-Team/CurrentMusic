@@ -17,6 +17,7 @@ from base64 import b64decode, b64encode
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
+from email.utils import formatdate, mktime_tz, parsedate_tz
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -1309,15 +1310,60 @@ def docs_redirect(handler, section):
     handler.end_headers()
 
 
-def serve_file(handler, fp, content_type, download_name=None, cache="public, max-age=3600"):
+def serve_file(handler, fp, content_type, download_name=None,
+               cache="public, max-age=3600", cdn_cache=None):
     """流式分发本地文件，带 Range 支持（安装包共用）。
 
     为什么要 Range：安卓系统下载器与浏览器在断网、切后台后会带 `Range` 续传，
     不支持时只能整包重下（40MB）；另外部分下载工具会先探测 `Accept-Ranges`。
+
+    为什么要 ETag：`latest` 这类稳定入口必须保持 no-cache，但重复请求若只能
+    整包回源，CDN/镜像就永远学不到“文件没变”。ETag/Last-Modified 让条件请求
+    直接得到 304；版本化 APK 则配合长缓存，避免每次更新都把整包算进源站出站。
     """
-    size = os.path.getsize(fp)
+    st = os.stat(fp)
+    size = st.st_size
+    etag = f'"{size:x}-{st.st_mtime_ns:x}"'
+    last_modified = formatdate(st.st_mtime, usegmt=True)
+
+    def _not_modified():
+        handler.send_response(304)
+        handler.send_header("ETag", etag)
+        handler.send_header("Last-Modified", last_modified)
+        handler.send_header("Cache-Control", cache)
+        if cdn_cache:
+            handler.send_header("CDN-Cache-Control", cdn_cache)
+        handler.send_header("Access-Control-Allow-Origin", "*")
+        handler.end_headers()
+
+    inm = (handler.headers.get("If-None-Match") or "").strip()
+    if inm:
+        tags = {x.strip() for x in inm.split(",")}
+        if inm == "*" or etag in tags:
+            return _not_modified()
+    else:
+        ims = (handler.headers.get("If-Modified-Since") or "").strip()
+        if ims:
+            try:
+                if int(st.st_mtime) <= int(mktime_tz(parsedate_tz(ims))):
+                    return _not_modified()
+            except (TypeError, ValueError, OverflowError):
+                pass
+
     start, end = 0, size - 1
     rng = handler.headers.get("Range") or ""
+    # If-Range：文件已变化时忽略 Range，回整包 200；否则断点续传可能拼出坏包。
+    if rng:
+        ir = (handler.headers.get("If-Range") or "").strip()
+        if ir:
+            try:
+                if ir.startswith(('"', "W/")):
+                    if ir != etag:
+                        rng = ""
+                elif int(st.st_mtime) > int(mktime_tz(parsedate_tz(ir))):
+                    rng = ""
+            except (TypeError, ValueError, OverflowError):
+                rng = ""
     mr = re.match(r"bytes=(\d*)-(\d*)", rng)
     if mr:
         if not mr.group(1) and mr.group(2):
@@ -1342,6 +1388,10 @@ def serve_file(handler, fp, content_type, download_name=None, cache="public, max
         handler.send_header("Content-Range", f"bytes {start}-{end}/{size}")
     handler.send_header("Content-Length", str(length))
     handler.send_header("Cache-Control", cache)
+    if cdn_cache:
+        handler.send_header("CDN-Cache-Control", cdn_cache)
+    handler.send_header("ETag", etag)
+    handler.send_header("Last-Modified", last_modified)
     handler.end_headers()
     with open(fp, "rb") as f:
         f.seek(start)
@@ -1957,16 +2007,26 @@ def _ncm_forward(handler, method, path, q, body):
             log.info("NCM 写操作审计 user=%s path=%s params=%s", u["id"], path,
                      sorted(k for k in q if k != "confirm"))
 
-    params = _comment_write_params(upstream, q) if comment_write else cm_ncm_gateway.normalize_params(path, q, method)
+    params = _comment_write_params(upstream, q) if comment_write else cm_ncm_gateway.normalize_params(
+        path, q, method,
+        # T0 公共只读的 timestamp 是客户端缓存破坏参数，不应参与上游/服务端缓存键。
+        drop_timestamp=(method == "GET" and tier == cm_ncm_registry.T0),
+    )
     # 搜索与音源都受用户网络位置影响；先注入可信 IP，再计算隔离缓存键。
     if cm_ncm_gateway.is_search_path(upstream) or cm_ncm_gateway.is_media_url_path(upstream):
         params["realIP"] = cm_ncm_gateway.client_ip(handler)
+    # 公共只读 GET 允许浏览器缓存 5 分钟（private：按用户隔离，CDN 不共享）。
+    # 媒体直链有有效期且 refresh=1 要求实时换线，不能套这个缓存。
+    client_cache = None
+    if (method == "GET" and tier == cm_ncm_registry.T0 and ttl > 0
+            and not cm_ncm_gateway.is_media_url_path(upstream)):
+        client_cache = f"private, max-age={min(int(ttl), 300)}"
     ck = None
     if ttl > 0 and method == "GET" and tier == cm_ncm_registry.T0:
         ck = cm_ncm_gateway.cache_key(upstream, params)
         hit = cm_db.cache_get(ck)
         if hit:
-            jresp(handler, 200, json.loads(hit))
+            jresp(handler, 200, json.loads(hit), cache_control=client_cache)
             return True          # jresp 本身无返回值：必须显式回 True，
                                  # 否则 route() 会当"未登记"再补写一个 404 响应
 
@@ -2010,7 +2070,7 @@ def _ncm_forward(handler, method, path, q, body):
         out = cm_ncm_gateway.https_upgrade(out)
     if ck:
         cm_db.cache_set(ck, json.dumps(out, ensure_ascii=False), ttl)
-    jresp(handler, 200, out)
+    jresp(handler, 200, out, cache_control=client_cache)
     return True
 
 
@@ -3955,12 +4015,14 @@ def route(handler, method):
         return jresp(handler, 200, {
             "version": cm_decor.catalog_version(),
             "scales": {d["id"]: d["scale"] for d in cat},
-        })
+        }, cache_control="public, max-age=3600")
 
     # 扩展名可选：挂件 id 唯一决定文件，目录里同时有 gif/png/apng（PNG 却请求 .gif 会 404）
+    # ?size= 按显示像素取缩略图；不带 size 默认 256px 原格式（旧客户端也能省流量）。
     m = re.fullmatch(r"/decor/([a-z0-9]{4,32})(?:\.(?:gif|png|apng))?", path)
     if m and method == "GET":
-        data, ctype = cm_decor.open_image(m.group(1))
+        size = cm_decor.thumb_size(q.get("size"))
+        data, ctype = cm_decor.open_image(m.group(1), max_px=size, want_webp=size is not None)
         if not data:
             raise ApiError(404, "挂件图片不存在")
         handler.send_response(200)
@@ -5134,14 +5196,17 @@ def route(handler, method):
         fp = os.path.join(RELEASES_DIR, m.group(1))
         if not os.path.isfile(fp):
             raise ApiError(404, "安装包不存在")
-        return serve_file(handler, fp, "application/vnd.android.package-archive")
+        # 文件名自带版本号（CurrentMusic-vX.Y.Z.apk），同版本不会复用不同内容。
+        return serve_file(handler, fp, "application/vnd.android.package-archive",
+                          cache="public, max-age=31536000, immutable",
+                          cdn_cache="public, max-age=31536000")
 
     # ======================== CurrentMusicX 安装包直链（v1.28.23） ========================
     # 上游是第三方仓库（bileizhen/CurrentMusicX）的 GitHub Releases；本机由
     # tools/sync-cmx-releases.py + currentmusic-x-sync.timer 每 3 分钟镜像一次，
     # 于是国内用户拿到的是本域直链，不必直连 GitHub。nginx 会去掉 /cm 前缀：
-    #   /cm/x/download/latest   直链，直接回 APK 本体（200，不跳转、不套页面）
-    #   /cm/x/download/<file>   指定版本直链（Range/断点续传）
+    #   /cm/x/download/latest   稳定入口，302 到当前版本的直链（不套页面）
+    #   /cm/x/download/<file>   指定版本直链（Range/断点续传，可长缓存）
     #   /cm/x/version/latest    版本元数据 JSON（给客户端查最新版用）
     if path == "/x/download/latest" and method == "GET":
         info = {}
@@ -5156,10 +5221,17 @@ def route(handler, method):
         fname = os.path.basename(apk.get("fileName") or "")
         local = os.path.join(X_RELEASES_DIR, fname) if fname else ""
         if local and os.path.isfile(local):
-            # 直接吐文件：第三方下载器/系统更新器不必处理跳转，
-            # no-cache 保证「latest」这个地址不会被缓存成旧版本。
-            return serve_file(handler, local, "application/vnd.android.package-archive",
-                              download_name=fname, cache="no-cache")
+            # 稳定入口只做 302，把「最新版」与「版本化文件」分开：
+            # latest 保持 no-cache（发布后立刻指向新版本），真正占流量的版本化
+            # URL 才能被 CDN/镜像按缓存头复用。CurrentMusicX 的更新器与测速
+            # 探针都会跟随重定向（UpdateDownloader.kt / UpdateSourceProbe.kt）。
+            handler.send_response(302)
+            handler.send_header("Location", f"/cm/x/download/{quote(fname)}")
+            handler.send_header("Access-Control-Allow-Origin", "*")
+            handler.send_header("Cache-Control", "no-cache")
+            handler.send_header("Content-Length", "0")
+            handler.end_headers()
+            return
         # 镜像尚未就绪（首启、正在下载、上游异常）时退到 GitHub，入口不空转
         if apk.get("githubUrl"):
             handler.send_response(302)
@@ -5206,8 +5278,11 @@ def route(handler, method):
         fp = os.path.join(X_RELEASES_DIR, name)
         if not os.path.isfile(fp):
             raise ApiError(404, "安装包不存在（可能已被更新的版本替换）")
+        # 版本化文件名可变但同一版本极少重发；先用 7 天而不是 immutable，
+        # 避免上游同 tag 重发时旧缓存长期取不到新包。
         return serve_file(handler, fp, "application/vnd.android.package-archive",
-                          download_name=name, cache="public, max-age=86400")
+                          download_name=name, cache="public, max-age=604800",
+                          cdn_cache="public, max-age=604800")
 
     if feedback_post:
         media_type = handler.headers.get("Content-Type", "").partition(";")[0].strip().lower()

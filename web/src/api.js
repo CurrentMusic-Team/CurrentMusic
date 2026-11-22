@@ -569,7 +569,11 @@ export const api = {
   countries: () => api.ncm('/countries/code/list'),
 
   avatarUrl: (fname) => fname ? `${settings.base}/avatar/${fname}` : '',
-  decorUrl: (id) => id ? `${settings.base}/decor/${encodeURIComponent(id)}.gif` : '',
+  // v=2：缩略图算法升级后绕过 nginx/BT 面板已有的 7 天 proxy_cache；
+  // 后端只读 size，不关心 v。旧客户端不经过这里，仍走兼容的默认缩略图。
+  decorUrl: (id, size) => id
+    ? `${settings.base}/decor/${encodeURIComponent(id)}.gif?v=2${size ? `&size=${encodeURIComponent(size)}` : ''}`
+    : '',
   // 挂件放大比例表（id → 比例）：广场/主页等只拿到挂件 id，需靠它换算渲染尺寸
   decorScales: () => call('GET', '/decorations/scales'),
 };

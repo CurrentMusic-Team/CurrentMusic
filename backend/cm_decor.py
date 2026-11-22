@@ -11,6 +11,7 @@
 `data/decorations/`，因此即使素材目录没同步全也能自愈；源站不可用时返回 None（路由 404）。
 """
 import hashlib
+import io
 import json
 import os
 import re
@@ -40,6 +41,18 @@ _UA = {"User-Agent": "CurrentMusic/1.0 (+avatar-decoration)"}
 # 素材留白程度不一（0.09~1.0），故按款实测并夹在合理区间，缺失时用全体中位数。
 SCALE_DEFAULT = 1.56
 SCALE_MIN, SCALE_MAX = 1.0, 2.6
+
+# 缩略图档位：前端按显示像素向上取档，避免每个用户生成一个新尺寸。
+# 默认 256px 覆盖头像列表/旧客户端的实际显示尺寸；单张原始 GIF 常为 1–5MB，
+# 缩到 256px 后通常只剩几十到几百 KB。
+THUMB_SIZES = (32, 48, 64, 96, 128, 192, 256)
+THUMB_DEFAULT_PX = 256
+THUMB_DIR = os.path.join(DATA_DIR, "decor-thumbs")
+THUMB_MAX_FRAMES = 60             # 256px 档最多保留 60 帧
+THUMB_SMALL_FRAMES = 30           # 128px 及以下（选择器/列表）30 帧足够
+THUMB_MAX_PIXELS = 40_000_000     # 所有帧累计像素上限，防止超大动图吃满内存
+_thumbs = {}                      # (id, px, fmt) → Lock，按 key 单飞生成
+_thumbs_guard = threading.Lock()
 
 
 def _norm_scale(v):
@@ -211,23 +224,176 @@ def _fetch_remote(item):
     return data
 
 
-def open_image(decoration_id):
-    """取挂件图片字节。返回 (data, content_type) 或 (None, None)。"""
-    item = get(decoration_id)
-    if not item:
-        return None, None
+def thumb_size(value):
+    """把 `?size=` 规整到固定档位；非法/缺省返回 None（由调用方用默认值）。"""
+    try:
+        n = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    for size in THUMB_SIZES:
+        if n <= size:
+            return size
+    return THUMB_SIZES[-1]
+
+
+def _ctype_for_ext(ext):
+    return {"webp": "image/webp", "gif": "image/gif",
+            "png": "image/png", "apng": "image/apng"}.get(ext, "application/octet-stream")
+
+
+def _read_source(item):
+    """原始素材字节：本地优先，缺失时回源并缓存。"""
     for d in IMAGE_DIRS:
         fp = os.path.join(d, item["file"])
         if os.path.isfile(fp):
             try:
                 with open(fp, "rb") as f:
-                    return f.read(), FORMATS[item["format"]]
+                    return f.read()
             except OSError:
                 continue
-    data = _fetch_remote(item)
-    if data is None:
+    return _fetch_remote(item)
+
+
+def _read_thumb(fp):
+    try:
+        if os.path.getsize(fp) > 0:
+            with open(fp, "rb") as f:
+                return f.read()
+    except OSError:
+        pass
+    return None
+
+
+def _write_thumb(fp, blob):
+    try:
+        os.makedirs(os.path.dirname(fp), exist_ok=True)
+        tmp = f"{fp}.{os.getpid()}.{threading.get_ident()}.part"
+        with open(tmp, "wb") as f:
+            f.write(blob)
+        os.replace(tmp, fp)
+    except OSError:
+        pass
+
+
+def _thumb_lock(decoration_id, px, ext):
+    key = (decoration_id, px, ext)
+    with _thumbs_guard:
+        lock = _thumbs.get(key)
+        if lock is None:
+            lock = _thumbs[key] = threading.Lock()
+        return lock
+
+
+def _resize_image(data, item, max_px, want_webp):
+    """把原始动图缩到 max_px，返回 (blob, content_type, ext) 或 None。
+
+    动图优先保留所有帧（最多 THUMB_MAX_FRAMES 帧）；WebP 编码器不可用时由
+    open_image() 回退到原格式缩略图，最后再回退原图。
+    """
+    try:
+        from PIL import Image, ImageSequence
+    except Exception:  # noqa: BLE001  —— PIL 是可选依赖
+        return None
+    Image.MAX_IMAGE_PIXELS = 25_000_000
+    try:
+        im = Image.open(io.BytesIO(data))
+        im.load()
+        w, h = im.size
+        if w <= 0 or h <= 0 or w * h > 25_000_000:
+            return None
+        n_frames = max(1, int(getattr(im, "n_frames", 1)))
+        cap = THUMB_SMALL_FRAMES if max_px <= 128 else THUMB_MAX_FRAMES
+        step = max(1, (n_frames + cap - 1) // cap)
+        frames, durations, total_px = [], [], 0
+        for idx, frame in enumerate(ImageSequence.Iterator(im)):
+            if idx % step:
+                continue
+            if len(frames) >= cap:
+                break
+            total_px += frame.size[0] * frame.size[1]
+            if total_px > THUMB_MAX_PIXELS:
+                break
+            rgba = frame.convert("RGBA")
+            scale = max_px / max(rgba.size)
+            if scale < 1:
+                rgba = rgba.resize(
+                    (max(1, round(rgba.width * scale)), max(1, round(rgba.height * scale))),
+                    Image.LANCZOS,
+                )
+            frames.append(rgba)
+            # 抽帧后把被跳过的时长累计到保留帧，动画总时长基本不变。
+            durations.append(int(frame.info.get("duration") or im.info.get("duration") or 80) * step)
+        if not frames:
+            return None
+        loop = int(im.info.get("loop") or 0)
+
+        if want_webp:
+            out = io.BytesIO()
+            if len(frames) > 1:
+                frames[0].save(out, "WEBP", save_all=True, append_images=frames[1:],
+                               duration=durations, loop=loop, quality=72, method=4)
+            else:
+                frames[0].save(out, "WEBP", quality=80, method=4)
+            return out.getvalue(), "image/webp", "webp"
+
+        fmt = item["format"]
+        out = io.BytesIO()
+        if fmt == "gif":
+            pal = [f.convert("P", palette=Image.ADAPTIVE, colors=256) for f in frames]
+            pal[0].save(out, "GIF", save_all=True, append_images=pal[1:],
+                        duration=durations, loop=loop, optimize=True, disposal=2)
+            return out.getvalue(), "image/gif", "gif"
+        if len(frames) > 1 and fmt == "apng":
+            frames[0].save(out, "PNG", save_all=True, append_images=frames[1:],
+                           duration=durations, loop=loop)
+            return out.getvalue(), "image/apng", "png"
+        frames[0].save(out, "PNG", optimize=True)
+        return out.getvalue(), "image/png", "png"
+    except Exception:  # noqa: BLE001  —— 解码/编码失败一律回退
+        return None
+
+
+def open_image(decoration_id, max_px=None, want_webp=False):
+    """取挂件图片字节。返回 (data, content_type) 或 (None, None)。
+
+    max_px=None 时返回 256px 缩略图（旧客户端不带参数也能省流量）；
+    带 `?size=` 时返回对应档位；want_webp 优先输出动画 WebP。
+    任何解码/编码失败都回退原图，保证挂件功能不受影响。
+    """
+    item = get(decoration_id)
+    if not item:
         return None, None
-    return data, FORMATS[item["format"]]
+    try:
+        max_px = int(max_px) if max_px is not None else THUMB_DEFAULT_PX
+    except (TypeError, ValueError):
+        max_px = THUMB_DEFAULT_PX
+    max_px = max(1, min(max_px, 512))
+    ext = "webp" if want_webp else item["format"]
+    fp = os.path.join(THUMB_DIR, f"{item['id']}-{max_px}.{ext}")
+    cached = _read_thumb(fp)
+    if cached is not None:
+        return cached, _ctype_for_ext(ext)
+
+    with _thumb_lock(item["id"], max_px, ext):
+        cached = _read_thumb(fp)
+        if cached is not None:
+            return cached, _ctype_for_ext(ext)
+        source = _read_source(item)
+        if source is None:
+            return None, None
+        resized = _resize_image(source, item, max_px, want_webp)
+        if resized is None and want_webp:
+            resized = _resize_image(source, item, max_px, False)   # WebP 不可用
+        if resized is None:
+            return source, FORMATS[item["format"]]
+        blob, ctype, out_ext = resized
+        if len(blob) >= len(source):
+            # 小图重编码反而更大：保留原图，避免“优化”成负收益
+            return source, FORMATS[item["format"]]
+        _write_thumb(os.path.join(THUMB_DIR, f"{item['id']}-{max_px}.{out_ext}"), blob)
+        return blob, ctype
 
 
 def stats():

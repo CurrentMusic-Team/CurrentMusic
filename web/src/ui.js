@@ -811,9 +811,13 @@ export function confirmDialog({ title, body = '', onOk }) {
 // transform 只是视觉溢出仍会被裁，改尺寸则不存在越界。
 export function decorHTML(user, size) {
   const id = user && user.avatarDecoration;
-  const url = id && api.decorUrl(id);
-  if (!url) return '';
+  if (!id) return '';
   const s = Math.round(size * decorScale(id) * 100) / 100;
+  // 按实际显示像素向上取固定档位：同一挂件在不同位置只生成少量缓存文件。
+  const bucket = s <= 32 ? 32 : s <= 48 ? 48 : s <= 64 ? 64
+    : s <= 96 ? 96 : s <= 128 ? 128 : s <= 192 ? 192 : 256;
+  const url = api.decorUrl(id, bucket);
+  if (!url) return '';
   return `<span class="cm-decor" style="width:${size}px;height:${size}px">`
     + `<img src="${esc(url)}" width="${s}" height="${s}" alt="" aria-hidden="true"></span>`;
 }

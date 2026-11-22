@@ -47,10 +47,14 @@ Android assets 保持构建时的 `app.js?v=...` 引用，Web 部署脚本另生
 参考 `deploy/nginx.conf.example` 配置以下缓存规则：
 
 - `/app/`、`/app/index.html`、SPA 路由、测速页和旧的无文件名指纹资源：
-  `Cache-Control: no-store, no-cache, must-revalidate, max-age=0`、
-  `CDN-Cache-Control: no-store`。CDN 控制台也必须遵循源站响应头，禁止整站强制缓存 HTML。
+  `Cache-Control: no-cache`，由 nginx 静态文件的 `ETag`/`Last-Modified` 在未变化时
+  返回 304；CDN 用 `CDN-Cache-Control: public, max-age=0, must-revalidate`。
+  不要用 `no-store`，否则每次进入都要重下 100KB+ 的图标/字体。
+  CDN 控制台也必须遵循源站响应头，禁止整站强制缓存 HTML。
 - `app.<16 位哈希>.js/css` 可长期缓存；缓存键必须包含完整路径。缺失的脚本、样式返回
   404，不回退到 HTML。旧指纹文件不随新部署删除。
+- 固定监控 UA 可在首页 location 得到 2 字节的 `no-store` 健康响应（仍返回 200），
+  避免每分钟抓取完整首页；健康响应必须禁止 CDN 缓存。
 - `/app` 的重定向使用相对 `Location: /app/`，避免 CDN 通过 HTTP 回源时把用户降到 HTTP。
 - 修改缓存规则后清理已有 HTML 和旧 `app.js/app.css` 缓存；仅修改源站响应头不会立即
   驱逐已经被 CDN 强制缓存的旧首页。API、登录凭据和用户数据禁止共享缓存。

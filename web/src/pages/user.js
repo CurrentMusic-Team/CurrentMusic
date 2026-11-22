@@ -46,7 +46,7 @@ function decorDialog(d, onDone) {
          ${list.map(x => `
            <div class="cm-decor-item ${x.id === d.current ? 'on' : ''}" data-id="${esc(x.id)}"
                 data-key="${esc((x.name + ' ' + x.id).toLowerCase())}" title="${esc(x.name)}">
-             <div class="cm-decor-thumb"><img loading="lazy" src="${esc(api.decorUrl(x.id))}" alt="${esc(x.name)}"></div>
+             <div class="cm-decor-thumb"><img loading="lazy" src="${esc(api.decorUrl(x.id, 96))}" alt="${esc(x.name)}"></div>
              <span>${esc(x.name)}</span>
            </div>`).join('')}
        </div>

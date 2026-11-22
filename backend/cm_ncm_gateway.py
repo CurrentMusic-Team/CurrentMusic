@@ -85,11 +85,13 @@ def decode_upload(body: dict, max_bytes: int = UPLOAD_MAX_BYTES):
 
 
 
-def normalize_params(path: str, query: dict, method: str) -> dict:
+def normalize_params(path: str, query: dict, method: str, *, drop_timestamp: bool = False) -> dict:
     """把入参整理成可直接交给上游的形式。
 
     - 丢弃保留参数，防止调用方自带 cookie 越权 / 覆盖网关策略
     - 非 GET 补 `timestamp`，绕开上游 2 分钟 URL 级缓存（写操作必须实时）
+    - GET 公共只读接口可丢 `timestamp`：它只是客户端的缓存破坏参数，
+      留在键里会让上游缓存/服务端缓存全部穿透（歌单详情单次可达 2.7MB）
     - 丢弃空值，避免上游把空串当成有效参数
     """
     out = {}
@@ -101,6 +103,8 @@ def normalize_params(path: str, query: dict, method: str) -> dict:
         out[k] = v
     if method != "GET":
         out["timestamp"] = str(int(time.time() * 1000))
+    elif drop_timestamp:
+        out.pop("timestamp", None)
     return out
 
 

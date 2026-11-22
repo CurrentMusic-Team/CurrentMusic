@@ -282,8 +282,10 @@ function boot() {
     document.getElementById('topbar').classList.toggle('scrolled', outEl.scrollTop > 8);
   }, { passive: true });
   window.addEventListener('hashchange', router);
+  // 无 hash 时赋值的 hashchange 会异步触发一次渲染；不要再同步 router()，
+  // 否则首次进入首页会跑两遍 render 和两遍 /bootstrap。
   if (!location.hash) location.hash = '#/home';
-  router();
+  else router();
 
   // 全局下拉刷新：重跑当前路由（页面 render 自带骨架屏与数据重取）
   initPullToRefresh(() => router({ refresh: true }));

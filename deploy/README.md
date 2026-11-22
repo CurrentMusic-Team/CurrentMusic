@@ -19,8 +19,12 @@ automatically installed.
   will be buffered.
 - Web/CDN caching: publish with `python3 tools/deploy-web.py --target data/app`.
   It creates content-addressed JS/CSS paths, retains previous bundles, and switches
-  the index last. Enable the optional `/app/` locations in the Nginx template;
-  mirrors must bypass HTML caching and respect `CDN-Cache-Control`.
+  the index last. Enable the optional `/app/` locations in the Nginx template.
+  HTML and non-fingerprinted assets should use `no-cache` (nginx returns 304 via
+  ETag/Last-Modified); only content-addressed bundles and API-doc `assets/` should
+  use `immutable`. Mirrors must bypass HTML caching and respect `CDN-Cache-Control`.
+  Fixed monitoring user agents may be answered with a tiny `no-store` health
+  response on `/` instead of the full landing page.
   Run `python3 tools/check-web-mirrors.py` after deployment to compare public
   mirror bundles with the local files. See [mirror troubleshooting](../docs/network-performance.md#镜像同步与回源排查).
 - `php/` — optional PHP front-controller entry for PHP-only hosts (Apache/nginx+FPM),

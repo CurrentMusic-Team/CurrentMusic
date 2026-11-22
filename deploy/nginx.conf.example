@@ -182,6 +182,21 @@ server {
     location = /apple-touch-icon.png { return 302 /app/apple-touch-icon.png?v=sage1; }
     location = /apple-touch-icon-precomposed.png { return 302 /app/apple-touch-icon.png?v=sage1; }
 
+    # 官网/首页若由 nginx 直接托管，可对固定监控 UA 返回极简健康响应：
+    # 监控仍看到 200，但不再每分钟拉 39KB 页面。健康响应必须 no-store，
+    # 避免 CDN 把 "ok" 缓存后返回给真实用户。
+    # location = / {
+    #     root /srv/currentmusic/data/home;
+    #     default_type text/plain;
+    #     try_files /index.html =404;
+    #     if ($http_user_agent ~* "PulseNode") {
+    #         add_header Cache-Control "no-store" always;
+    #         add_header CDN-Cache-Control "no-store" always;
+    #         return 200 "ok";
+    #     }
+    #     add_header Cache-Control "no-cache";
+    # }
+
     # Dedicated API handbook (cd api-docs && npm ci && npm run build && npm run publish).
     # location = /api-docs { return 302 /api-docs/; }
     # location ^~ /api-docs/ {
@@ -190,6 +205,12 @@ server {
     #     try_files $uri $uri/ =404;
     #     add_header Cache-Control "no-cache";
     #     add_header X-Content-Type-Options "nosniff" always;
+    #     # VitePress 的 assets/ 带内容哈希，可长缓存
+    #     location ^~ /api-docs/assets/ {
+    #         try_files $uri =404;
+    #         add_header Cache-Control "public, max-age=31536000, immutable";
+    #         add_header CDN-Cache-Control "public, max-age=31536000";
+    #     }
     # }
     # location = /app {
     #     absolute_redirect off;  # preserve HTTPS through an HTTP CDN origin connection
@@ -200,8 +221,9 @@ server {
     # location = /app/auto {
     #     alias /srv/currentmusic/data/app/auto.html;
     #     default_type text/html;
-    #     add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
-    #     add_header CDN-Cache-Control "no-store" always;
+    #     # no-cache 允许 304；no-store 会让每次进入都重下正文。
+    #     add_header Cache-Control "no-cache" always;
+    #     add_header CDN-Cache-Control "public, max-age=0, must-revalidate" always;
     # }
     # location = /app/auto/ {
     #     absolute_redirect off;
@@ -214,8 +236,10 @@ server {
     #     index index.html;
     #     gzip_static on;  # requires --with-http_gzip_static_module; tools/deploy-web.py creates .gz
     #     try_files $uri $uri/ /app/index.html;
-    #     add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
-    #     add_header CDN-Cache-Control "no-store" always;
+    #     # HTML 与未指纹资源用 no-cache：nginx 静态文件自带 ETag/Last-Modified，
+    #     # 未变化时只回 304，不再每次重下 100KB+ 的图标/字体。
+    #     add_header Cache-Control "no-cache" always;
+    #     add_header CDN-Cache-Control "public, max-age=0, must-revalidate" always;
     #     add_header X-Content-Type-Options "nosniff" always;
     #     location ~* "^/app/app\.[0-9a-f]{16}\.(js|css)$" {
     #         try_files $uri =404;
@@ -225,8 +249,8 @@ server {
     #     }
     #     location ~* \.(js|css|woff2|png|svg|json)$ {
     #         try_files $uri =404;  # missing assets must not return the SPA HTML
-    #         add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
-    #         add_header CDN-Cache-Control "no-store" always;
+    #         add_header Cache-Control "no-cache" always;
+    #         add_header CDN-Cache-Control "public, max-age=0, must-revalidate" always;
     #         add_header X-Content-Type-Options "nosniff" always;
     #     }
     # }

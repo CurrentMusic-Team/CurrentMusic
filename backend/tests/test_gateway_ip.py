@@ -69,6 +69,20 @@ class TestRealIpPolicy(unittest.TestCase):
             self.assertEqual(m.call_args.kwargs["real_ip"], "36.59.138.2")
 
 
+class TestNormalizeParams(unittest.TestCase):
+    def test_t0_get_can_drop_client_timestamp(self):
+        q = {"id": "123", "timestamp": "1760000000000", "cookie": "secret"}
+        p = gw.normalize_params("/playlist/detail", q, "GET", drop_timestamp=True)
+        self.assertEqual(p, {"id": "123"})
+        # 默认行为保持不变：非 T0 / 未显式要求时仍原样转发客户端参数
+        self.assertEqual(gw.normalize_params("/playlist/detail", q, "GET")["timestamp"],
+                         "1760000000000")
+
+    def test_writes_still_get_server_timestamp(self):
+        p = gw.normalize_params("/playlist/detail", {"id": "1"}, "POST", drop_timestamp=True)
+        self.assertTrue(p["timestamp"].isdigit())
+
+
 class TestClientIp(unittest.TestCase):
     def test_x_real_ip_first_and_unforgeable(self):
         """nginx 覆盖写入的 X-Real-IP 压过一切伪造头（CF 头 / XFF 首值）。"""
