@@ -39,6 +39,8 @@ export function loadUpstream(directory, mode) {
       return handler(parameters, (options) => {
         if (operation === 'send') {
           options = { ...options, baseURL: 'https://loginserviceretry.kugou.com' };
+        } else if (/^http:\/\/gateway\.kugou\.com\/?$/.test(options.baseURL ?? '')) {
+          options = { ...options, baseURL: 'https://gateway.kugou.com' };
         }
         return createRequest(options);
       });

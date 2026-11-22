@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { classifyPlayback, createClient } from './client.mjs';
+import { classifyPlayback, createClient, ProbeError } from './client.mjs';
+import { startServer } from './server.mjs';
 
 const hash = 'abcdef0123456789abcdef0123456789';
 const audio = 'https://cdn.example.org/song.mp3';
@@ -71,7 +72,11 @@ test('distinguishes a preview, a duration match and an unverified URL', () => {
   assert.deepEqual(classifyPlayback({ url: audio, timelength: 30_000 }, 210), { state: 'preview', durationSec: 30, url: null });
   assert.equal(classifyPlayback({ url: audio, timeLength: 210 }, 210).state, 'full_candidate');
   assert.equal(classifyPlayback({ url: audio }, 210).state, 'unverified');
-  assert.equal(classifyPlayback({ url: 'http://cdn.example.org/song.mp3' }, 210).state, 'unavailable');
+  assert.equal(classifyPlayback({ url: 'http://cdn.example.org/song.mp3' }, 210).state, 'http_only');
+  assert.equal(classifyPlayback({ backupUrl: [audio], timeLength: 210 }, 210).state, 'full_candidate');
+  const kugouHttp = 'http://fs.youthandroid2.kugou.com/song.ogg';
+  assert.deepEqual(classifyPlayback({ url: kugouHttp, timeLength: 210 }, 210, true), { state: 'full_candidate', durationSec: 210, url: kugouHttp });
+  assert.equal(classifyPlayback({ url: 'http://cdn.example.org/song.mp3', timeLength: 210 }, 210, true).state, 'http_only');
 });
 
 test('does not return playback URLs obtained only after requesting preview', async () => {
@@ -95,4 +100,47 @@ test('requests song authorization in lite mode and uses that mode throughout', a
   assert.equal(calls[2][1].auth, 'user-auth-fixture');
   assert.equal(calls[3][1].auth, 'song-auth-fixture');
   assert.equal(calls[3][1].open_time, 123);
+});
+
+test('serves authenticated local search and full playback only', async (t) => {
+  const fixtureKey = 'local-testing-fixture-only';
+  const track = { hash, albumAudioId: '30', title: '示例', artist: '示例歌手', durationSec: 210 };
+  let state = 'full_candidate';
+  const server = await startServer({
+    async search(query) {
+      assert.equal(query, '示例');
+      return [track];
+    },
+    async play(track, duration) {
+      assert.deepEqual(track, { hash, albumAudioId: '30' });
+      assert.equal(duration, 210);
+      if (state === 'expired') throw new ProbeError('session_expired', 'play');
+      return { state, durationSec: 210, url: audio };
+    },
+  }, fixtureKey, 0);
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const search = `${base}/v1/search?q=${encodeURIComponent('示例')}`;
+  const play = `${base}/v1/tracks/${hash}/play`;
+  const headers = { Authorization: `Bearer ${fixtureKey}` };
+
+  assert.equal((await fetch(`${base}/health`)).status, 200);
+  assert.equal((await fetch(search)).status, 401);
+  assert.equal((await fetch(search, { headers: { ...headers, Origin: 'https://example.org' } })).status, 403);
+  assert.deepEqual(await (await fetch(search, { headers })).json(), { tracks: [track] });
+  assert.equal((await fetch(play, { headers })).status, 400);
+  const playback = await fetch(`${play}?albumAudioId=30&durationSec=210`, { headers });
+  assert.equal(playback.status, 200);
+  assert.equal(playback.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(await playback.json(), { url: audio, durationSec: 210 });
+
+  state = 'preview';
+  const preview = await fetch(`${play}?albumAudioId=30&durationSec=210`, { headers });
+  assert.equal(preview.status, 422);
+  assert.deepEqual(await preview.json(), { error: 'preview' });
+
+  state = 'expired';
+  const expired = await fetch(`${play}?albumAudioId=30&durationSec=210`, { headers });
+  assert.equal(expired.status, 401);
+  assert.deepEqual(await expired.json(), { error: 'session_expired' });
 });

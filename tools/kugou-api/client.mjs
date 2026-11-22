@@ -44,21 +44,27 @@ function normalizeTrack(item) {
   };
 }
 
-export function classifyPlayback(data, expectedSec) {
+export function classifyPlayback(data, expectedSec, allowKugouHttp = false) {
   const reportedDuration = Number(data?.timeLength ?? data?.timelength ?? data?.time_length);
   let durationSec = null;
   if (Number.isFinite(reportedDuration) && reportedDuration > 0) {
     durationSec = reportedDuration >= 10_000 ? reportedDuration / 1000 : reportedDuration;
   }
   const preview = [data?.is_free_part, data?.isFreePart, data?.is_preview].some((value) => value === true || Number(value) === 1);
-  const values = [data?.url, data?.play_url].flat();
-  const url = values.find((value) => typeof value === 'string' && URL.canParse(value) && new URL(value).protocol === 'https:') ?? null;
+  const values = [data?.url, data?.play_url, data?.playUrl, data?.backupUrl, data?.backup_url].flat();
+  const urls = values.flatMap((value) => typeof value === 'string' && URL.canParse(value) ? [new URL(value)] : []);
+  const safeUrls = urls.filter((value) => !value.username && !value.password);
+  const url = safeUrls.find((value) => value.protocol === 'https:')
+    ?? safeUrls.find((value) => allowKugouHttp && value.protocol === 'http:' && value.hostname.endsWith('.kugou.com') && !value.port);
   if (preview || (durationSec && expectedSec && durationSec < expectedSec - 5)) {
     return { state: 'preview', durationSec, url: null };
   }
-  if (!url) return { state: 'unavailable', durationSec, url: null };
+  if (!url) {
+    const state = urls.some((value) => value.protocol === 'http:') ? 'http_only' : 'unavailable';
+    return { state, durationSec, url: null };
+  }
   const state = durationSec && expectedSec && Math.abs(durationSec - expectedSec) <= 5 ? 'full_candidate' : 'unverified';
-  return { state, durationSec, url };
+  return { state, durationSec, url: url.href };
 }
 
 export function createClient(upstream, mode) {
@@ -134,11 +140,11 @@ export function createClient(upstream, mode) {
         operation = 'authorizedPlay';
       }
       const { body } = await request(operation, params);
-      const result = classifyPlayback(body.data ?? body, expectedSec);
+      const result = classifyPlayback(body.data ?? body, expectedSec, mode === 'lite');
       if (result.state === 'unavailable' && operation === 'play') {
         const preview = (await request('play', { ...params, free_part: true })).body;
         const fallback = classifyPlayback(preview.data ?? preview, expectedSec);
-        if (fallback.state === 'preview' || fallback.url) {
+        if (['preview', 'http_only'].includes(fallback.state) || fallback.url) {
           return { state: 'preview_fallback', durationSec: null, url: null };
         }
       }

@@ -2,9 +2,10 @@ import { createInterface } from 'node:readline/promises';
 import { Writable } from 'node:stream';
 import { parseArgs } from 'node:util';
 import { createClient, ProbeError } from './client.mjs';
+import { startServer } from './server.mjs';
 import { loadUpstream } from './upstream.mjs';
 
-const usage = '用法：node tools/kugou-api/probe.mjs --upstream /path/to/KuGouMusicApi [--mode standard|lite]';
+const usage = '用法：node tools/kugou-api/probe.mjs --upstream /path/to/KuGouMusicApi [--mode standard|lite] [--serve] [--port 4017]';
 const stdout = process.stdout;
 
 function terminal() {
@@ -68,24 +69,32 @@ async function checkTrack(client, prompt, label) {
 async function main() {
   const { values } = parseArgs({ options: {
     upstream: { type: 'string' },
-    mode: { type: 'string', default: 'standard' },
+    mode: { type: 'string' },
+    port: { type: 'string', default: '4017' },
+    serve: { type: 'boolean' },
     help: { type: 'boolean' },
   } });
   if (values.help) {
     console.log(usage);
     return;
   }
-  if (!values.upstream || !['standard', 'lite'].includes(values.mode) || !process.stdin.isTTY) {
+  const mode = values.mode ?? (values.serve ? 'lite' : 'standard');
+  const port = Number(values.port);
+  if (!values.upstream || !['standard', 'lite'].includes(mode) || !process.stdin.isTTY || !Number.isInteger(port) || port < 1 || port > 65535) {
     throw new ProbeError('invalid_arguments', usage);
+  }
+  const secret = process.env.KUGOU_LOCAL_API_KEY ?? '';
+  if (values.serve && (mode !== 'lite' || !/^[\x21-\x7e]{24,128}$/.test(secret))) {
+    throw new ProbeError('invalid_service_configuration', '使用 lite 模式并设置 KUGOU_LOCAL_API_KEY');
   }
 
   let upstream;
   try {
-    upstream = loadUpstream(values.upstream, values.mode);
+    upstream = loadUpstream(values.upstream, mode);
   } catch {
     throw new ProbeError('upstream_setup_failed', 'KuGouMusicApi');
   }
-  const client = createClient(upstream, values.mode);
+  const client = createClient(upstream, mode);
   const prompt = terminal();
   try {
     const mobile = await prompt.question('手机号：', true);
@@ -100,6 +109,11 @@ async function main() {
     else console.log(`已登录，账号末四位 ${account.userid.slice(-4)}，免费版身份待核对。`);
 
     await client.registerDevice();
+    if (values.serve) {
+      await startServer(client, secret, port);
+      console.log(`本地 API http://127.0.0.1:${port}`);
+      return;
+    }
     await checkTrack(client, prompt, '普通免费歌');
     await checkTrack(client, prompt, '权益歌曲 1');
     await checkTrack(client, prompt, '权益歌曲 2');
