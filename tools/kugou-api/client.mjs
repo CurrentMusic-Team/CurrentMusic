@@ -134,7 +134,15 @@ export function createClient(upstream, mode) {
         operation = 'authorizedPlay';
       }
       const { body } = await request(operation, params);
-      return classifyPlayback(body.data ?? body, expectedSec);
+      const result = classifyPlayback(body.data ?? body, expectedSec);
+      if (result.state === 'unavailable' && operation === 'play') {
+        const preview = (await request('play', { ...params, free_part: true })).body;
+        const fallback = classifyPlayback(preview.data ?? preview, expectedSec);
+        if (fallback.state === 'preview' || fallback.url) {
+          return { state: 'preview_fallback', durationSec: null, url: null };
+        }
+      }
+      return result;
     },
   };
 }

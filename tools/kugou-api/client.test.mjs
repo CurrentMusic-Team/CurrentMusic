@@ -74,6 +74,15 @@ test('distinguishes a preview, a duration match and an unverified URL', () => {
   assert.equal(classifyPlayback({ url: 'http://cdn.example.org/song.mp3' }, 210).state, 'unavailable');
 });
 
+test('does not return playback URLs obtained only after requesting preview', async () => {
+  const { client, calls } = mockClient({
+    play: ({ free_part }) => response(free_part ? { url: audio, timeLength: 210 } : {}),
+  });
+  await client.login('13800138000', '000000');
+  assert.deepEqual(await client.play({ hash }, 210), { state: 'preview_fallback', durationSec: null, url: null });
+  assert.equal(calls[2][1].free_part, true);
+});
+
 test('requests song authorization in lite mode and uses that mode throughout', async () => {
   const { client, calls } = mockClient({
     userAuth: () => response({ auth: 'user-auth-fixture' }),

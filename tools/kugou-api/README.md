@@ -22,6 +22,7 @@ node tools/kugou-api/probe.mjs --upstream ../KuGouMusicApi
 | 结果 | 含义 |
 | --- | --- |
 | `preview` | 上游标记为试听，或返回时长明显短于全曲 |
+| `preview_fallback` | 普通播放无地址，启用试听参数后才有返回 |
 | `unavailable` | 没有可用的 HTTPS 播放地址 |
 | `unverified` | 有播放地址，返回时长未知或与对照不一致 |
 | `full_candidate` | 有播放地址，返回时长与对照一致 |
