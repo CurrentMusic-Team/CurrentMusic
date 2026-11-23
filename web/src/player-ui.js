@@ -271,7 +271,7 @@ function paintLyricSource() {
   if (!status) return;
   const data = lyricRequest?.data;
   const sources = { 'lddc:qm': 'QQ 音乐', 'lddc:kg': '酷狗音乐', 'lddc:ne': '网易云音乐',
-    'lddc:lrclib': 'LRCLIB', 'ncm:yrc': '网易云音乐', 'ncm:lrc': '网易云音乐' };
+    'lddc:lrclib': 'LRCLIB', 'ncm:yrc': '网易云音乐', 'ncm:lrc': '网易云音乐', 'kugou:krc': '酷狗概念版', 'kugou:lrc': '酷狗概念版' };
   const timing = data?.wordLevel ? '逐字' : lyricLines.some(line => line.wSynth) ? '估算逐字' : '逐行';
   status.textContent = lyricRequest?.failed ? '歌词加载失败' : !data ? '正在查找歌词…'
     : data.instrumental ? '纯音乐' : !lyricLines.length ? '暂无歌词'
@@ -299,7 +299,7 @@ async function loadLyric() {
   pushDesktopLyric(-1, true);
   let data;
   try {
-    data = isKugouSong(player.meta) ? { lines: [] } : await api.lyric(id, autoLyrics);
+    data = isKugouSong(player.meta) ? await kugouRequest('track.lyrics', { id: player.meta.kugou_id }) : await api.lyric(id, autoLyrics);
     if (!Array.isArray(data?.lines)) throw new Error('歌词格式无效');
   } catch {
     request.failed = true;
@@ -1748,7 +1748,7 @@ window.addEventListener('cm-likechange', event => {
 
 function syncKugouControls(ov, track) {
   const display = isKugouSong(track) ? 'none' : '';
-  for (const id of ['plAdd', 'plLike', 'plStar', 'plAskAi', 'plHeart', 'plCast', 'plCastSlot', 'plComments']) {
+  for (const id of ['plAdd', 'plLike', 'plStar', 'plAskAi', 'plHeart', 'plCast', 'plCastSlot']) {
     const control = ov.querySelector('#' + id);
     if (control) control.style.display = display;
   }
@@ -1876,8 +1876,9 @@ export function openQueue() {
 // 说明：此处原先是一份 200 行的「只在歌曲维度可用」的实现，已抽到 comments.js，
 // 以免同一套热门/最新/楼层/点赞/回复逻辑在多处分叉。
 export async function openComments(meta) {
-  if (!meta || isKugouSong(meta)) return;
+  if (!meta) return;
   const { openComments: openEntityComments } = await import('./comments.js');
+  if (isKugouSong(meta)) return openEntityComments({ id: meta.kugou_id, title: meta.name, provider: 'kugou' });
   return openEntityComments({ type: 0, id: meta.ncm_id, title: meta.name || '歌曲' });
 }
 

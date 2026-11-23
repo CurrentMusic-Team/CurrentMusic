@@ -286,7 +286,9 @@ def endpoint_text(method, path, node, title, access=None):
 def write_music_service_specs(output):
     operations = {
         key: {"label": op.label, "providers": list(op.providers), "scope": op.scope or None,
-              "write": op.write, "media": op.media or None}
+              "write": op.write, "media": op.media or None,
+              **({"kugouSearchKinds": list(cm_music_service.cm_kugou_catalog.SEARCH_TYPES)}
+                 if key == "catalog.search" else {})}
         for key, op in cm_music_service.OPERATIONS.items()
     }
     (output/'music-service-capabilities.json').write_text(

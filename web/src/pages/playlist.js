@@ -2,6 +2,8 @@
 import { api, auth } from '../api.js';
 import { esc, renderSongList, toast, confirmDialog, skelList, skelDetail } from '../ui.js';
 import { player } from '../player.js';
+import { kugouRequest } from '../kugou.js';
+import { kugouDaily, kugouDetailLink, kugouSongs, musicPlatform } from '../music-platform.js';
 import { addToPlaylist } from '../player-ui.js';
 import { openShare } from '../share.js';
 import { getAimoChartCover } from '../aimo-charts.js';
@@ -9,13 +11,27 @@ import { getAimoChartCover } from '../aimo-charts.js';
 export async function render(el, params) {
   const kind = params[0]; // pl | ncmpl | special
   const id = params[1];
+  if (kind === 'kugou-charts') return renderKugouCharts(el);
+  const catalogKind = kind.startsWith('kugou-') ? kind.slice(6) : '';
+  const playlist = catalogKind ? kugouDetailLink(catalogKind, id)
+    : kind === 'daily' ? '#/daily' : '#/' + kind + '/' + id;
 
   el.innerHTML = skelDetail();
   let title = '', desc = '', songs = [], removable = false, owner = false, cover = '', badge = '';
   let shareKind = '', shareSub = '';
+  let catalogAlbums = [], nextOffset = null;
 
   try {
-    if (kind === 'pl' && id === 'likes') {
+    if (catalogKind) {
+      const result = await kugouRequest('catalog.' + catalogKind, { id });
+      const resource = result.resource;
+      title = resource.name;
+      cover = resource.artwork;
+      desc = [resource.artists, resource.description].filter(Boolean).join(' · ');
+      songs = kugouSongs(result.tracks);
+      nextOffset = result.nextOffset;
+      catalogAlbums = result.albums;
+    } else if (kind === 'pl' && id === 'likes') {
       if (!auth.token) throw new Error('请先登录');
       const d = await api.likedSongs();
       songs = d.songs || [];
@@ -35,8 +51,7 @@ export async function render(el, params) {
       owner = !isNcm && p.user_id === (auth.user && auth.user.id);
       removable = owner;
     } else if (kind === 'daily') {
-      const d = await api.daily();
-      songs = d.daily || [];
+      songs = musicPlatform() === 'kugou' ? await kugouDaily() : (await api.daily()).daily || [];
       title = '每日推荐'; desc = `今天为你准备了 ${songs.length} 首`;
     } else if (kind === 'ncmpl') {
       const p = await api.ncmPlaylist(id);
@@ -95,6 +110,11 @@ export async function render(el, params) {
       </div>
     </div>
     <div id="list"></div>
+    ${nextOffset != null ? '<div class="cm-more-row"><mdui-button id="kgLoadMore" variant="text">加载更多</mdui-button></div>' : ''}
+    ${catalogAlbums.length ? `<section class="cm-sec"><div class="cm-sec-head"><h2>专辑</h2></div>
+      <div class="cm-hscroll">${catalogAlbums.map(album => `<a class="cm-card" href="${esc(kugouDetailLink('album', album.id))}">
+        <img src="${esc(album.artwork)}" alt="" loading="lazy"><div class="cm-card-name">${esc(album.name)}</div></a>`).join('')}</div>
+    </section>` : ''}
     <section class="cm-sec" id="plSimiSec" hidden><div class="cm-sec-head"><h2>相似歌单</h2></div><div class="cm-plgrid" id="plSimi"></div></section>`;
 
   let list = el.querySelector('#list');
@@ -163,6 +183,24 @@ export async function render(el, params) {
 
   await attachSongList(songs);
 
+  const more = el.querySelector('#kgLoadMore');
+  if (more) more.onclick = async () => {
+    more.disabled = true;
+    try {
+      const result = await kugouRequest('catalog.' + catalogKind, { id, offset: nextOffset });
+      if (!more.isConnected) return;
+      const known = new Set(originalSongs.map(song => song.kugou_id));
+      originalSongs.push(...kugouSongs(result.tracks).filter(song => !known.has(song.kugou_id)));
+      songs = applySort(sortKey);
+      nextOffset = result.nextOffset;
+      await attachSongList(songs);
+      if (nextOffset == null) more.parentElement.remove();
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      more.disabled = false;
+    }
+  };
   el.querySelector('#playAll').onclick = () => songs.length ? player.playList(songs, 0) : toast('列表为空');
   const sharePl = el.querySelector('#sharePl');
   if (sharePl) sharePl.onclick = () => openShare({
@@ -212,4 +250,19 @@ export async function render(el, params) {
     location.hash = '#/search';
     toast('在搜索结果用「全部收入歌单」，或在播放页加入歌单');
   };
+}
+
+
+async function renderKugouCharts(el) {
+  el.innerHTML = skelList(5);
+  try {
+    const { items } = await kugouRequest('discover.charts', {});
+    el.innerHTML = `<section class="cm-sec"><div class="cm-sec-head"><h2>排行榜</h2></div>
+      <div class="cm-plgrid">${items.map(item => `<a class="cm-plcard" href="${esc(kugouDetailLink('playlist', item.id))}">
+        <div class="cm-plcover">${item.artwork ? `<img src="${esc(item.artwork)}" alt="" loading="lazy">` : ''}
+          <span class="material-icons-outlined">trending_up</span></div>
+        <div class="cm-plname">${esc(item.name)}</div></a>`).join('')}</div></section>`;
+  } catch (error) {
+    el.innerHTML = `<div class="cm-empty">${esc(error.message)}</div>`;
+  }
 }

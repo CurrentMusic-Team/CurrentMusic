@@ -12,6 +12,8 @@
 //   · TAB 栏就地更新计数而不整块重建，否则指示条的 cmTabIn 动画会被反复重播
 //   · prefers-reduced-motion 下全部跳过
 import { api, ncmSongs } from '../api.js';
+import { kugouRequest } from '../kugou.js';
+import { kugouDetailLink, kugouSongs, musicPlatform } from '../music-platform.js';
 import { esc, fmtCount, renderSongList, toast } from '../ui.js';
 import { player } from '../player.js';
 import { addToPlaylist } from '../player-ui.js';
@@ -63,6 +65,11 @@ function animateIn(els, { y = 8, stagger = 26, cap = 160 } = {}) {
 let seq = 0;
 
 export async function render(el, params = []) {
+  const kugou = musicPlatform() === 'kugou';
+  const detailLink = (kind, id) => kugou ? kugouDetailLink(kind, id)
+    : `#/${kind === 'playlist' ? 'ncmpl' : kind}/${id}`;
+  const catalog = (kind, text, offset = 0, limit = BATCH) =>
+    kugouRequest('catalog.search', { query: text.slice(0, 60), kind, offset, limit });
   // 翱翔鸟Music：搜索框走 SwiftUI 样式（灰底圆角 + 放大镜），其余皮肤仍是 MD3 outlined
   const sbTheme = document.documentElement.getAttribute('data-ui-preset') === 'soaringbird';
   el.innerHTML = `
@@ -77,7 +84,6 @@ export async function render(el, params = []) {
         <span slot="icon" class="material-icons-outlined" aria-hidden="true">search</span>搜索
       </mdui-button>
     </form>
-    <a class="cm-sec-more" href="#/kugou">搜索酷狗音乐</a>
     <div id="sugBox"></div>
     <div id="histBox"></div>
     <details id="matchLocal" class="cm-search-local">
@@ -87,7 +93,7 @@ export async function render(el, params = []) {
         <label>歌手<input name="artist"></label>
         <label>专辑<input name="album"></label>
         <label>时长（秒）<input name="duration" type="number" min="0.01" step="any" required></label>
-        <label>文件 MD5<input name="md5" pattern="[0-9a-fA-F]{32}" maxlength="32" required placeholder="32 位十六进制"></label>
+        <label>文件 MD5<input name="md5" pattern="[0-9a-fA-F]{32}" maxlength="32"${kugou ? '' : ' required'} placeholder="32 位十六进制"></label>
         <button class="cm-search-go" type="submit">匹配</button>
       </form>
       <div id="matchBox"></div>
@@ -149,13 +155,17 @@ export async function render(el, params = []) {
     e.preventDefault();
     if (matchButton.disabled) return;
     const fields = new FormData(matchForm);
-    const query = Object.fromEntries(['title', 'artist', 'album', 'duration', 'md5'].map(k => [k, fields.get(k).trim()]));
+    const query = Object.fromEntries(['title', 'artist', 'album', 'duration', 'md5'].map(k => [k, (fields.get(k) || '').trim()]));
     if (!query.title) { toast('请输入歌曲标题'); return; }
     matchButton.disabled = true;
     matchBox.innerHTML = panelLoading();
     try {
-      const data = await api.ncm('/search/match', query);
-      const songs = ncmSongs(data.result?.songs || []);
+      const songs = kugou
+        ? kugouSongs((await catalog('song', [query.title, query.artist].filter(Boolean).join(' '))).items)
+            .filter(song => song.name.toLowerCase() === query.title.toLowerCase()
+              && (!query.duration || Math.abs(song.duration - Number(query.duration) * 1000) <= 3000)
+              && (!query.md5 || song.kugou_id.startsWith(query.md5.toLowerCase() + '-')))
+        : ncmSongs((await api.ncm('/search/match', query)).result?.songs || []);
       if (songs.length) await renderSongList(matchBox, songs, { deferStatus: true, onPlay: i => playSong(songs, i) });
       else matchBox.innerHTML = '<div class="cm-empty">没有匹配到歌曲，请核对文件信息</div>';
     } catch (e) { matchBox.innerHTML = `<div class="cm-empty">匹配失败：${esc(e.message)}</div>`; }
@@ -164,7 +174,7 @@ export async function render(el, params = []) {
 
   // 默认搜索关键词（占位提示）：失败保持原 label，不影响使用
   let defaultKeyword = '';
-  api.searchDefault().then(d => {
+  if (!kugou) api.searchDefault().then(d => {
     defaultKeyword = (d.data?.realkeyword || d.data?.showKeyword || '').trim();
     if (defaultKeyword) {
       const hint = `试试「${d.data?.showKeyword || defaultKeyword}」`;
@@ -175,6 +185,7 @@ export async function render(el, params = []) {
 
   let hotRequest;
   async function hotKeywords() {
+    if (kugou) return (await kugouRequest('discover.hot', {})).items.map(searchWord => ({ searchWord }));
     const detail = await api.searchHotDetail().catch(() => null);
     const rows = Array.isArray(detail?.data) ? detail.data.filter(item => item?.searchWord) : [];
     if (rows.length) return rows;
@@ -191,7 +202,7 @@ export async function render(el, params = []) {
     hotBox.innerHTML = `
       <header class="cm-hot-head">
         <span class="material-icons-outlined cm-hot-icon" aria-hidden="true">trending_up</span>
-        <div><h2 id="searchHotTitle">搜索热榜</h2><p>网易云音乐热门搜索</p></div>
+        <div><h2 id="searchHotTitle">搜索热榜</h2><p>${kugou ? '酷狗概念版' : '网易云音乐'}热门搜索</p></div>
         <span class="cm-hot-count">TOP ${rows.length}</span>
       </header>
       <ol class="cm-hot-list" id="searchHotList" role="list">${rows.map(({ searchWord, content, score }, i) => `
@@ -246,6 +257,17 @@ export async function render(el, params = []) {
 
   /** 取某一类型的一页（offset 为 0 时覆盖，否则追加）。返回本次新增条数。 */
   async function load(t, offset, state = S) {
+    if (t === 'match' && kugou) {
+      const kinds = ['song', 'artist', 'album', 'playlist'];
+      const [songs, ...groups] = await Promise.all(kinds.map(kind => catalog(kind, state.kw, 0, 5)));
+      const labels = ['歌手', '专辑', '歌单'];
+      state.items.match = kugouSongs(songs.items).map(song => ({ song })).concat(
+        groups.flatMap((group, i) => group.items.map(item => ({
+          label: labels[i], name: item.name, href: detailLink(kinds[i + 1], item.id),
+        }))));
+      state.loaded.match = true;
+      return;
+    }
     if (t === 'match') {
       const { result = {} } = await api.ncm('/search/multimatch', { keywords: state.kw });
       const songs = ncmSongs(result.song || result.songs || []);
@@ -264,6 +286,17 @@ export async function render(el, params = []) {
       }
       state.loaded.match = true;
       return;
+    }
+    if (kugou) {
+      const result = await catalog(t, state.kw, offset);
+      const got = t === 'song' || t === 'lyric' ? kugouSongs(result.items)
+        : result.items.map(item => ({ ...item, pic: item.artwork, artist: item.artists }));
+      state.items[t] = (offset ? state.items[t] || [] : []).concat(got);
+      state.total[t] = state.items[t].length;
+      state.offsets[t] = result.nextOffset;
+      state.more[t] = result.nextOffset != null;
+      state.loaded[t] = true;
+      return got.length;
     }
     const d = await api.search(state.kw, offset, BATCH, t);
     const got = d[ARR[t]] || [];
@@ -397,14 +430,14 @@ export async function render(el, params = []) {
     const added = all.slice(from);
     if (!added.length) return;
     box.insertAdjacentHTML('beforeend', added.map(a => `
-      <div class="cm-card cm-album-card" data-id="${a.id}" title="播放专辑「${esc(a.name)}」">
+      <div class="cm-card cm-album-card" data-id="${esc(a.id)}" title="播放专辑「${esc(a.name)}」">
         <img src="${esc(a.pic)}?param=300y300" loading="lazy" onerror="this.classList.add('none')">
         <div class="cm-card-name">${esc(a.name)}</div>
         <div class="cm-card-sub">${esc(a.artist)}</div>
       </div>`).join(''));
     const els = [...box.querySelectorAll('.cm-album-card')].slice(-added.length);
     els.forEach(c => {
-      c.onclick = () => { location.hash = `#/album/${c.dataset.id}`; };
+      c.onclick = () => { location.hash = detailLink('album', c.dataset.id); };
     });
     if (from) { animateIn(els); refreshMore('album'); }
     else if (items) animateIn(els);
@@ -422,14 +455,14 @@ export async function render(el, params = []) {
     const added = all.slice(from);
     if (!added.length) return;
     box.insertAdjacentHTML('beforeend', added.map(a => `
-      <div class="cm-artist-card" data-id="${a.id}">
+      <div class="cm-artist-card" data-id="${esc(a.id)}">
         <div class="cm-artist-ava">${a.pic ? `<img src="${esc(a.pic)}?param=120y120" loading="lazy">` : '<span class="material-icons-outlined">person</span>'}</div>
         <div class="cm-artist-name">${esc(a.name)}</div>
         ${a.alias ? `<div class="cm-artist-sub">${esc(a.alias)}</div>` : ''}
       </div>`).join(''));
     const els = [...box.querySelectorAll('.cm-artist-card')].slice(-added.length);
     els.forEach(c => {
-      c.onclick = () => { location.hash = `#/artist/${c.dataset.id}`; };
+      c.onclick = () => { location.hash = detailLink('artist', c.dataset.id); };
     });
     if (from) { animateIn(els); refreshMore('artist'); }
     else if (items) animateIn(els);
@@ -450,14 +483,14 @@ export async function render(el, params = []) {
     const added = all.slice(from);
     if (!added.length) return;
     box.insertAdjacentHTML('beforeend', added.map(pl => `
-      <div class="cm-plcard" data-id="${pl.id}">
+      <div class="cm-plcard" data-id="${esc(pl.id)}">
         <div class="cm-plcover">${pl.pic ? `<img src="${esc(pl.pic)}?param=300y300" loading="lazy" onerror="this.remove()">` : ''}<span class="material-icons-outlined">queue_music</span></div>
         <div class="cm-plname">${esc(pl.name)}</div>
-        <div class="cm-plsub">${pl.trackCount} 首 · ${fmtPlay(pl.playCount)}播放</div>
+        <div class="cm-plsub">${pl.trackCount ?? 0} 首${kugou ? '' : ` · ${fmtPlay(pl.playCount)}播放`}</div>
       </div>`).join(''));
     const els = [...box.querySelectorAll('.cm-plcard')].slice(-added.length);
     els.forEach(c => {
-      c.onclick = () => { location.hash = `#/ncmpl/${c.dataset.id}`; };
+      c.onclick = () => { location.hash = detailLink('playlist', c.dataset.id); };
     });
     if (from) { animateIn(els); refreshMore('playlist'); }
     else if (items) animateIn(els);
@@ -627,12 +660,17 @@ export async function render(el, params = []) {
     sugBox.innerHTML = suggestionSkeleton;
     sugTimer = setTimeout(async () => {
       try {
-        const mobile = await api.searchSuggest(kw).catch(() => null);
-        if (!isCurrent()) return;
-        let words = (mobile?.result?.allMatch || []).map(x => x.keyword).filter(Boolean);
-        if (!words.length) {
-          const pc = await api.ncm('/search/suggest/pc', { keyword: kw });
-          words = (pc?.data?.suggests || []).map(x => x.keyword).filter(Boolean);
+        let words;
+        if (kugou) {
+          words = (await kugouRequest('discover.suggest', { query: kw.slice(0, 60) })).items;
+        } else {
+          const mobile = await api.searchSuggest(kw).catch(() => null);
+          if (!isCurrent()) return;
+          words = (mobile?.result?.allMatch || []).map(x => x.keyword).filter(Boolean);
+          if (!words.length) {
+            const pc = await api.ncm('/search/suggest/pc', { keyword: kw });
+            words = (pc?.data?.suggests || []).map(x => x.keyword).filter(Boolean);
+          }
         }
         if (!isCurrent()) return;
         if (!words.length) { hideSuggestions(); return; }

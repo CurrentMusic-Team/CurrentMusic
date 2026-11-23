@@ -8,6 +8,7 @@ from urllib.parse import urlencode, urlsplit
 
 import cm_db
 import cm_kugou
+import cm_kugou_catalog
 import cm_ncm
 import cm_passport
 import cm_qq
@@ -66,7 +67,7 @@ def descriptor(origin):
             continue
         platforms[provider] = [
             {"id": key, "label": op.label, "scope": op.scope or None, "write": op.write,
-             **({"kinds": ["song"]} if provider == "kugou" and key == "catalog.search" else {})}
+             **({"kinds": list(cm_kugou_catalog.SEARCH_TYPES)} if provider == "kugou" and key == "catalog.search" else {})}
             for key, op in OPERATIONS.items()
             if provider in op.providers and operation_enabled(provider, op) and (not op.scope or op.scope in usable_scopes)
         ]
@@ -443,15 +444,16 @@ BOTH = ("netease", "qqmusic")
 OPERATIONS = {
     "catalog.search": Operation("搜索", search, providers=(*BOTH, "kugou")),
     "catalog.track": Operation("歌曲详情", details("song"), providers=(*BOTH, "kugou")),
-    "catalog.album": Operation("专辑", details("album"), providers=BOTH),
-    "catalog.artist": Operation("歌手", details("artist"), providers=BOTH),
-    "catalog.playlist": Operation("公开歌单", details("playlist"), providers=BOTH),
-    "discover.hot": Operation("热搜", hot),
-    "discover.suggest": Operation("搜索联想", suggest),
-    "discover.charts": Operation("榜单", charts),
-    "discover.recommendations": Operation("每日推荐", recommendation, "music.library.read"),
-    "track.lyrics": Operation("歌词", lyrics, providers=BOTH, media="lyrics"),
-    "track.comments": Operation("歌曲评论", comments),
+    "catalog.album": Operation("专辑", details("album"), providers=(*BOTH, "kugou")),
+    "catalog.artist": Operation("歌手", details("artist"), providers=(*BOTH, "kugou")),
+    "catalog.playlist": Operation("公开歌单", details("playlist"), providers=(*BOTH, "kugou")),
+    "discover.hot": Operation("热搜", hot, providers=("netease", "kugou")),
+    "discover.suggest": Operation("搜索联想", suggest, providers=("netease", "kugou")),
+    "discover.charts": Operation("榜单", charts, providers=("netease", "kugou")),
+    "discover.recommendations": Operation("每日推荐", recommendation, "music.library.read", providers=("netease", "kugou")),
+    "discover.playlists": Operation("推荐歌单", None, providers=("kugou",)),
+    "track.lyrics": Operation("歌词", lyrics, providers=(*BOTH, "kugou"), media="lyrics"),
+    "track.comments": Operation("歌曲评论", comments, providers=("netease", "kugou")),
     "track.comment.add": Operation("发表评论", comment_add, "music.comment.write", write=True),
     "playback.qualities": Operation("音质档位", qualities, "music.play", providers=("netease", "kugou"), media="playback"),
     "playback.resolve": Operation("播放取址", play, "music.play", providers=("netease", "kugou"), media="playback"),
@@ -490,7 +492,7 @@ def principal(header, scope):
 
 def operation_enabled(provider, entry):
     if provider == "kugou":
-        return bool(cm_kugou.base()) and (not entry.media or cm_kugou.playback_enabled())
+        return bool(cm_kugou.base()) and (entry.media != "playback" or cm_kugou.playback_enabled())
     return media_enabled(entry.media)
 
 
@@ -500,19 +502,44 @@ def kugou_operation(operation, data, uid, origin):
         error(404, "unsupported_operation", "该服务未开放此酷狗能力")
     if not isinstance(data, dict):
         error(400, "invalid_input", "需要 input 对象")
-    if entry.scope and not cm_kugou.authorized_user(cm_db.get_user(uid)):
+    if entry.scope == "music.play" and not cm_kugou.authorized_user(cm_db.get_user(uid)):
         error(403, "account_access_restricted", "当前账号没有播放权限")
-    if operation == "catalog.search":
+    if operation in ("catalog.search", "discover.suggest"):
         query = string(data, "query", 60)
-        if not query or string(data, "kind", 15, default="song") != "song":
-            error(400, "invalid_input", "酷狗当前支持单曲搜索")
-        return cm_kugou.search(query, *paging(data))
+        if not query:
+            error(400, "invalid_input", "需要搜索词")
+        if operation == "discover.suggest":
+            return cm_kugou_catalog.suggest(query)
+        kind = string(data, "kind", 15, default="song")
+        if kind not in cm_kugou_catalog.SEARCH_TYPES:
+            error(400, "invalid_input", "需要有效的资源类型")
+        return cm_kugou_catalog.search(query, kind, *paging(data))
+    if operation == "discover.hot":
+        return cm_kugou_catalog.hot()
+    if operation == "discover.charts":
+        return cm_kugou_catalog.charts()
+    if operation == "discover.recommendations":
+        return cm_kugou_catalog.recommendations()
+    if operation == "discover.playlists":
+        return cm_kugou_catalog.featured_playlists()
     ident = reference(data)
     if operation == "catalog.track":
         return {"resource": cm_kugou.track(ident)[0]}
+    if operation.startswith("catalog."):
+        return cm_kugou_catalog.details(operation.removeprefix("catalog."), ident, *paging(data))
+    if operation == "track.lyrics":
+        return cm_kugou_catalog.lyrics(ident)
+    if operation == "track.comments":
+        sort = string(data, "sort", 12, default="hot")
+        if sort not in ("hot", "recommended") or string(data, "cursor", 120):
+            error(400, "invalid_input", "酷狗评论支持热门或推荐排序，以及页码分页")
+        return cm_kugou_catalog.comments(ident, integer(data, "page", 1, 500, 1),
+                                        integer(data, "limit", 1, 50, 20))
     if operation == "playback.qualities":
         return cm_kugou.qualities(ident)
-    return cm_kugou.resolve(ident, string(data, "quality", 16, default="auto"), uid, origin)
+    if operation == "playback.resolve":
+        return cm_kugou.resolve(ident, string(data, "quality", 16, default="auto"), uid, origin)
+    error(404, "unsupported_operation", "该服务未开放此酷狗能力")
 
 
 def dispatch(operation, body, header, ip, *, origin=""):

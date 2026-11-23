@@ -1,5 +1,6 @@
 // 通用网易云评论抽屉。排序与楼层分页使用服务端统一响应。
 import { api } from './api.js';
+import { kugouRequest } from './kugou.js';
 import { esc, fmtCount, toast, skelComments } from './ui.js';
 import { renderEmoticons, fmtCmtTime } from './commentutil.js';
 
@@ -7,7 +8,8 @@ const SORTS = { recommended: '推荐', hot: '最热', latest: '最新' };
 export const COMMENT_TYPE = { song: 0, mv: 1, playlist: 2, album: 3, dj: 4, video: 5, event: 6 };
 let dismissComments;
 
-export async function openComments({ type = 0, id, title = '' } = {}) {
+export async function openComments({ type = 0, id, title = '', provider = 'netease' } = {}) {
+  const kugou = provider === 'kugou';
   if (!Object.values(COMMENT_TYPE).includes(type) || !id) return toast('缺少评论对象');
   dismissComments?.(true);
   const ov = document.createElement('div');
@@ -20,7 +22,7 @@ export async function openComments({ type = 0, id, title = '' } = {}) {
         <span class="cmt-top-spacer" aria-hidden="true"></span>
       </header>
       <div class="cmt-modes" role="group" aria-label="评论排序">
-        ${Object.entries(SORTS).map(([key, label]) =>
+        ${Object.entries(kugou ? { hot: SORTS.hot } : SORTS).map(([key, label]) =>
           `<button type="button" class="cmt-mode cmt-action" data-sort="${key}" aria-pressed="false">${label}</button>`).join('')}
         <span class="cmt-total"></span>
       </div>
@@ -29,7 +31,7 @@ export async function openComments({ type = 0, id, title = '' } = {}) {
         <div class="cmt-list-status" role="status"></div>
         <button type="button" class="cmt-page-more cmt-action" id="cmtMore" hidden></button>
       </div>
-      <div class="cmt-composer">
+      <div class="cmt-composer"${kugou ? ' hidden' : ''}>
         <div id="cmtReplyBar" hidden><span></span><button type="button" class="cmt-action" id="cmtReplyCancel" aria-label="取消回复"><span class="material-icons-outlined" aria-hidden="true">close</span></button></div>
         <input id="cmtInput" type="text" maxlength="140" aria-label="网易云评论内容" placeholder="绑定网易云账号后可发评" disabled>
         <mdui-button variant="filled" id="cmtSend" disabled>发送</mdui-button>
@@ -117,22 +119,23 @@ export async function openComments({ type = 0, id, title = '' } = {}) {
         ${c.avatar ? `<img src="${esc(c.avatar)}" alt="" loading="lazy">` : `<div class="cmt-avaph">${icon('person')}</div>`}
         <div class="cmt-main">
           <div class="cmt-head">
-            <span class="cmt-nick">${esc(c.nickname || '网易云用户')}</span>
+            <span class="cmt-nick">${esc(c.nickname || (kugou ? '酷狗用户' : '网易云用户'))}</span>
             ${mine ? '<span class="cmt-mine">我</span><button type="button" class="cmt-del cmt-action" data-action="delete">删除</button>' : ''}
           </div>
           ${c.beNickname ? `<div class="cmt-be">回复 <strong>@${esc(c.beNickname)}</strong>${c.beContent ? ` · ${renderEmoticons(esc(c.beContent))}` : ' · 原评论已删除'}</div>` : ''}
           <div class="cmt-content">${renderEmoticons(esc(c.content))}</div>
           <div class="cmt-foot">
             <span class="cmt-time">${fmtCmtTime(c.time)}</span>
+            ${kugou ? `<span class="cmt-like">${icon('thumb_up_off_alt')}${fmtCount(count)}</span>` : `
             <button type="button" class="cmt-action cmt-reply" data-action="reply">回复</button>
             ${!nested && type === COMMENT_TYPE.song ? `<button type="button" class="cmt-action cmt-hug" data-action="hug" data-uid="${esc(c.userId)}">抱一抱</button>` : ''}
             ${nested ? '' : '<button type="button" class="cmt-action cmt-report" data-action="report">举报</button>'}
             <button type="button" class="cmt-action cmt-like${liked ? ' on' : ''}" data-action="like" data-id="${esc(c.id)}"
               data-count="${count}" aria-label="点赞 ${count}" aria-pressed="${!!liked}" ${liking.has(c.id) ? 'disabled' : ''}>
               ${icon(liked ? 'thumb_up' : 'thumb_up_off_alt')}<span class="cmt-like-count">${count ? fmtCount(count) : '赞'}</span>
-            </button>
+            </button>`}
           </div>
-          ${nested ? '' : `
+          ${nested || kugou ? '' : `
             <button type="button" class="cmt-action cmt-floor-btn" data-action="floor" data-count="${replies}"
               aria-expanded="false" aria-controls="floor-${esc(c.id)}" ${replies ? '' : 'hidden'}>${icon('expand_more')}<span class="cmt-floor-label">展开 ${fmtCount(replies)} 条回复</span></button>
             <div class="cmt-floor" id="floor-${esc(c.id)}" data-parent="${esc(c.id)}" hidden>
@@ -173,7 +176,8 @@ export async function openComments({ type = 0, id, title = '' } = {}) {
     moreButton.hidden = true;
     status.textContent = state.page > 1 ? '正在加载更多评论…' : '';
     try {
-      const data = await api.commentPage({ ...resource, sort: state.sort, page: state.page,
+      const data = kugou ? await kugouRequest('track.comments', { id, sort: state.sort, page: state.page })
+        : await api.commentPage({ ...resource, sort: state.sort, page: state.page,
         ...(state.cursor ? { cursor: state.cursor } : {}) });
       await entered;
       if (!active() || current !== state) return;
@@ -384,5 +388,5 @@ export async function openComments({ type = 0, id, title = '' } = {}) {
     else void otherAction(action, cid, button);
   };
 
-  await switchSort('recommended');
+  await switchSort(kugou ? 'hot' : 'recommended');
 }
