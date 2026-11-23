@@ -1,5 +1,6 @@
 import { isKugouSong, kugouQuality, kugouRequest, KUGOU_QUALITIES } from './kugou.js';
 // 播放器 UI：底部迷你条 + 全屏播放页（封面/歌词/进度/音质/点赞/收藏/加入歌单）。
+import { kugouAddTracks, kugouPlaylists, kugouWrite } from './kugou-library.js';
 import { mdui } from './md.js';
 import { createWaveform, WAVE_STYLE } from './waveform.js';
 import { waveStyle, waveTilt } from './customize.js';
@@ -1319,7 +1320,7 @@ async function openFull() {
   const likeBtn = ov.querySelector('#plLike');
   injectSlot(likeBtn, st.liked ? 'heartFilled' : 'heart');
   likeBtn.onclick = async () => {
-    await toggleLikeDefault(m, () => syncPlayerLike(m));
+    await toggleLikeDefault(player.meta, () => syncPlayerLike(player.meta));
   };
   // 汉堡菜单左侧的五角星：复用「喜欢」逻辑，状态由 syncPlayerLike 同步
   const star = ov.querySelector('#plStar');
@@ -1704,7 +1705,6 @@ function bindArtistLinks(scope) {
 /** 按「默认红心目标」同步播放页红心、网易云小圆点与红心数。 */
 let playerLikeRevision = 0;
 async function syncPlayerLike(m, refresh = true) {
-  if (isKugouSong(m)) return;
   if (!m) return;
   const revision = ++playerLikeRevision;
   try {
@@ -1729,7 +1729,7 @@ async function syncPlayerLike(m, refresh = true) {
     const stat = document.getElementById('plLikeStat');
     if (stat) stat.innerHTML = `<span class="mi">favorite</span> ${fmtCount(s.count || 0)} 红心`;
     // 红心先更新；较慢的统计请求只补数量，不能用旧状态覆盖新的点击结果。
-    if (refresh) {
+    if (refresh && !isKugouSong(m)) {
       const latest = await ensureStatus(m.ncm_id);
       if (revision === playerLikeRevision && player.meta?.ncm_id === m.ncm_id) {
         const countNode = document.getElementById('plLikeStat');
@@ -1743,12 +1743,12 @@ async function syncPlayerLike(m, refresh = true) {
   } catch { /* 未绑定/网络失败：保留当前 UI */ }
 }
 window.addEventListener('cm-likechange', event => {
-  if (!event.detail?.id || Number(player.meta?.ncm_id) === event.detail.id) syncPlayerLike(player.meta, false);
+  if (!event.detail?.id || String(player.meta?.ncm_id) === String(event.detail.id)) syncPlayerLike(player.meta, false);
 });
 
 function syncKugouControls(ov, track) {
   const display = isKugouSong(track) ? 'none' : '';
-  for (const id of ['plAdd', 'plLike', 'plStar', 'plAskAi', 'plHeart', 'plCast', 'plCastSlot']) {
+  for (const id of ['plAskAi', 'plHeart', 'plCast', 'plCastSlot']) {
     const control = ov.querySelector('#' + id);
     if (control) control.style.display = display;
   }
@@ -1888,15 +1888,17 @@ export async function openComments(meta) {
 export async function addToPlaylist(songs) {
   if (!auth.token) return toast('登录后才能操作歌单');
   if (!songs || !songs.length) return;
+  const kugou = isKugouSong(songs[0]);
+  if (songs.some(track => isKugouSong(track) !== kugou)) return toast('请选择同一音乐平台的歌曲');
   let pls = [];
-  try { pls = ((await api.myPlaylists()).playlists || []).filter(p => p.source !== "ncm"); }
+  try { pls = kugou ? await kugouPlaylists() : ((await api.myPlaylists()).playlists || []).filter(p => p.source !== "ncm"); }
   catch (e) { return toast(e.message); }
 
   const diag = mdui.dialog({
     headline: `加入歌单（${songs.length} 首）`,
     body: `
       <div class="cm-pl-pick">
-        ${pls.map(p => `<div class="cm-pl-pick-item" data-id="${p.id}"><span class="material-icons-outlined">queue_music</span><div><div>${esc(p.name)}</div><div class="sub">${p.track_count} 首</div></div></div>`).join('')}
+        ${pls.map(p => `<div class="cm-pl-pick-item" data-id="${esc(p.id)}"><span class="material-icons-outlined">queue_music</span><div><div>${esc(p.name)}</div><div class="sub">${p.track_count} 首</div></div></div>`).join('')}
         <div class="cm-pl-pick-item new" id="plNew"><span class="material-icons-outlined">add</span><div>新建歌单</div></div>
       </div>`,
     actions: [{ text: '取消' }],
@@ -1910,15 +1912,22 @@ export async function addToPlaylist(songs) {
           promptDialog({
             title: '新建歌单', label: '歌单名称',
             onOk: async name => {
-              const p = await api.createPlaylist(name, '');
-              await api.addPlaylistTracks(p.id, songs);
+              if (kugou) {
+                const { resource } = await kugouWrite('library.playlist.create', { name,
+                  trackIds: songs.slice(0, 50).map(song => song.kugou_id) });
+                await kugouAddTracks(resource.id, songs.slice(50));
+              } else {
+                const p = await api.createPlaylist(name, '');
+                await api.addPlaylistTracks(p.id, songs);
+              }
               toast(`已创建「${name}」并加入 ${songs.length} 首`);
             },
           });
           return;
         }
         try {
-          await api.addPlaylistTracks(+el.dataset.id, songs);
+          if (kugou) await kugouAddTracks(el.dataset.id, songs);
+          else await api.addPlaylistTracks(+el.dataset.id, songs);
           toast(`已加入「${el.querySelector('div div').textContent}」`);
           diag.open = false;
         } catch (e) { toast(e.message); }

@@ -1,8 +1,9 @@
 // 列表详情页：自己的歌单 / likes / favs / 每日推荐 / NCM 排行榜（#/ncmpl/:pid）
 import { api, auth } from '../api.js';
-import { esc, renderSongList, toast, confirmDialog, skelList, skelDetail } from '../ui.js';
+import { esc, renderSongList, toast, confirmDialog, setStatus, skelList, skelDetail } from '../ui.js';
 import { player } from '../player.js';
 import { kugouRequest } from '../kugou.js';
+import { kugouPersonalLink, kugouWrite } from '../kugou-library.js';
 import { kugouDaily, kugouDetailLink, kugouSongs, musicPlatform } from '../music-platform.js';
 import { addToPlaylist } from '../player-ui.js';
 import { openShare } from '../share.js';
@@ -12,25 +13,33 @@ export async function render(el, params) {
   const kind = params[0]; // pl | ncmpl | special
   const id = params[1];
   if (kind === 'kugou-charts') return renderKugouCharts(el);
-  const catalogKind = kind.startsWith('kugou-') ? kind.slice(6) : '';
-  const playlist = catalogKind ? kugouDetailLink(catalogKind, id)
-    : kind === 'daily' ? '#/daily' : '#/' + kind + '/' + id;
+  const favorites = kind === 'kugou-favorites' || (kind === 'pl' && id === 'likes' && musicPlatform() === 'kugou');
+  const personal = kind === 'kugou-personal';
+  const catalogKind = !personal && !favorites && kind.startsWith('kugou-') ? kind.slice(6) : '';
+  const playlist = favorites || personal ? kugouPersonalLink(personal ? id : null)
+    : catalogKind ? kugouDetailLink(catalogKind, id) : kind === 'daily' ? '#/daily' : '#/' + kind + '/' + id;
 
   el.innerHTML = skelDetail();
   let title = '', desc = '', songs = [], removable = false, owner = false, cover = '', badge = '';
   let shareKind = '', shareSub = '';
-  let catalogAlbums = [], nextOffset = null;
+  let catalogAlbums = [], nextOffset = null, loadPage;
+  if (favorites) loadPage = offset => kugouRequest('library.favorites', { offset });
+  else if (personal) loadPage = offset => kugouRequest('library.playlist', { id, offset });
+  else if (catalogKind) loadPage = offset => kugouRequest('catalog.' + catalogKind, { id, offset });
 
   try {
-    if (catalogKind) {
-      const result = await kugouRequest('catalog.' + catalogKind, { id });
+    if (loadPage) {
+      const result = await loadPage(0);
       const resource = result.resource;
-      title = resource.name;
-      cover = resource.artwork;
-      desc = [resource.artists, resource.description].filter(Boolean).join(' · ');
-      songs = kugouSongs(result.tracks);
+      title = favorites ? '我喜欢的音乐' : resource.name;
+      cover = resource?.artwork || '';
+      const count = favorites ? result.total : resource.trackCount;
+      desc = [resource?.artists, resource?.description, count == null ? '' : `共 ${count} 首`].filter(Boolean).join(' · ');
+      songs = kugouSongs(result.tracks || result.items);
       nextOffset = result.nextOffset;
-      catalogAlbums = result.albums;
+      catalogAlbums = result.albums || [];
+      owner = personal;
+      removable = favorites || personal;
     } else if (kind === 'pl' && id === 'likes') {
       if (!auth.token) throw new Error('请先登录');
       const d = await api.likedSongs();
@@ -100,12 +109,12 @@ export async function render(el, params) {
         <div class="cm-detail-actions">
           <mdui-button variant="filled" id="playAll"><span class="material-icons-outlined">play_arrow</span>播放全部</mdui-button>
           ${shareKind ? `<mdui-button variant="tonal" id="sharePl"><span class="material-icons-outlined">share</span>分享</mdui-button>` : ''}
-          ${kind !== 'pl' || !owner ? '' : `<mdui-button variant="tonal" id="addSongs"><span class="material-icons-outlined">add</span>添加歌曲</mdui-button>`}
-          ${kind === 'pl' ? `<mdui-button variant="tonal" id="refreshPl"><span class="material-icons-outlined">refresh</span>刷新</mdui-button>` : ''}
+          ${!owner ? '' : `<mdui-button variant="tonal" id="addSongs"><span class="material-icons-outlined">add</span>添加歌曲</mdui-button>`}
+          ${kind === 'pl' || personal ? `<mdui-button variant="tonal" id="refreshPl"><span class="material-icons-outlined">refresh</span>刷新</mdui-button>` : ''}
           ${kind === 'ncmpl' ? `<mdui-button variant="tonal" id="plComments"><span class="material-icons-outlined">comment</span>评论</mdui-button>` : ''}
           ${kind === 'ncmpl' && auth.token ? `<mdui-button variant="tonal" id="editPl"><span class="material-icons-outlined">edit</span>编辑歌单</mdui-button>` : ''}
           ${kind === 'ncmpl' ? `<mdui-button variant="tonal" id="saveOrder"><span class="material-icons-outlined">save</span>保存排序</mdui-button>` : ''}
-          ${kind === 'pl' && owner ? `<mdui-button variant="tonal" id="delPl"><span class="material-icons-outlined">delete</span>删除</mdui-button>` : ''}
+          ${owner ? `<mdui-button variant="tonal" id="delPl"><span class="material-icons-outlined">delete</span>删除</mdui-button>` : ''}
         </div>
       </div>
     </div>
@@ -122,11 +131,17 @@ export async function render(el, params) {
     renderSongList(list, tracks, {
       deferStatus: true,
       likeSource: id === 'likes' ? 'local' : undefined,
+      onLikeChange: favorites ? () => render(el, params) : undefined,
       onPlay: i => player.playList(tracks, i),
       onRemove: removable ? async i => {
         const s = tracks[i];
         try {
-          if (id === 'likes') await api.toggleLike(s);
+          if (favorites) {
+            await kugouWrite('library.favorite.set', { id: s.kugou_id, selected: false });
+            setStatus(s.ncm_id, { liked: false, faved: false });
+          } else if (personal) {
+            await kugouWrite('library.playlist.tracks', { id, trackIds: [s.kugou_id], selected: false });
+          } else if (id === 'likes') await api.toggleLike(s);
           else await api.delPlaylistTracks(+id, [s.ncm_id]);
           render(el, params);
         } catch (e) { toast(e.message); }
@@ -187,10 +202,10 @@ export async function render(el, params) {
   if (more) more.onclick = async () => {
     more.disabled = true;
     try {
-      const result = await kugouRequest('catalog.' + catalogKind, { id, offset: nextOffset });
+      const result = await loadPage(nextOffset);
       if (!more.isConnected) return;
       const known = new Set(originalSongs.map(song => song.kugou_id));
-      originalSongs.push(...kugouSongs(result.tracks).filter(song => !known.has(song.kugou_id)));
+      originalSongs.push(...kugouSongs(result.tracks || result.items).filter(song => !known.has(song.kugou_id)));
       songs = applySort(sortKey);
       nextOffset = result.nextOffset;
       await attachSongList(songs);
@@ -243,7 +258,12 @@ export async function render(el, params) {
   const del = el.querySelector('#delPl');
   if (del) del.onclick = () => confirmDialog({
     title: `删除歌单「${title}」？`, body: '删除后不可恢复。',
-    onOk: async () => { await api.deletePlaylist(+id); toast('已删除'); location.hash = '#/library'; },
+    onOk: async () => {
+      if (personal) await kugouWrite('library.playlist.delete', { id });
+      else await api.deletePlaylist(+id);
+      toast('已删除');
+      location.hash = '#/library';
+    },
   });
   const addBtn = el.querySelector('#addSongs');
   if (addBtn) addBtn.onclick = () => {

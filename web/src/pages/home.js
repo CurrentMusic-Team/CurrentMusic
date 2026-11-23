@@ -186,6 +186,7 @@ export async function render(el) {
   if (kugou) {
     const [data, banner] = await Promise.all([kugouHome(), accountBannersHTML()]);
     daily = data.daily;
+    recent = data.recent;
     const mainRanks = ['TOP500', '飙升榜', '新歌榜'];
     charts = mainRanks.map(name => data.charts.find(item => item.name === name)).filter(Boolean);
     recPls = data.playlists.map(item => ({ ...item, picUrl: item.artwork, href: chartHref(item.id) }));

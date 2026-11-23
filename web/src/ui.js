@@ -1,4 +1,6 @@
 // UI 工具：转义、toast、时长格式、歌曲行渲染（含点赞/收藏状态）、对话框封装。
+import { isKugouSong, kugouRequest } from './kugou.js';
+import { kugouWrite } from './kugou-library.js';
 import { mdui } from './md.js';
 import { api, auth, decorScale, settings } from './api.js';
 import { levelBadge } from './level-badges.js';
@@ -403,8 +405,28 @@ export const skelRoom = () => `<div class="cm-skeleton cm-skel-room" role="statu
 
 const statusCache = new Map(); // ncm_id -> {liked, faved, count}
 
+const hasKugouId = id => typeof id === 'string' && id.startsWith('kg:');
+
+async function fetchKugouStatus(ids) {
+  if (!auth.token || !ids.length) return;
+  const token = auth.token, base = settings.base;
+  try {
+    const selected = new Set();
+    for (let start = 0; start < ids.length; start += 100) {
+      const reply = await kugouRequest('library.favorite.status', { ids: ids.slice(start, start + 100).map(id => id.slice(3)) });
+      reply.selectedIds.forEach(id => selected.add('kg:' + id));
+    }
+    if (auth.token !== token || settings.base !== base) return;
+    ids.forEach(id => {
+      if (!statusCache.has(id)) setStatus(id, { liked: selected.has(id), faved: selected.has(id) });
+    });
+  } catch { /* Keep rows playable when personal status is unavailable. */ }
+}
+
 async function fetchStatus(ids) {
-  const need = ids.filter(i => !statusCache.has(i));
+  const missing = ids.filter(i => !statusCache.has(i));
+  const need = missing.filter(i => !hasKugouId(i));
+  const kgStatus = fetchKugouStatus(missing.filter(hasKugouId));
   const token = auth.token;
   if (need.length) {
     try {
@@ -421,6 +443,7 @@ async function fetchStatus(ids) {
       });
     } catch { /* 未登录等情况：保持默认 */ }
   }
+  await kgStatus;
   return ids.map(i => statusCache.get(i) || { liked: false, faved: false, count: 0 });
 }
 
@@ -537,6 +560,10 @@ export async function likeSource() {
 
 /** 当前歌曲在默认目标下的红心状态（count 为网易云红心数口径）。 */
 export async function ensureLikeState(song) {
+  if (isKugouSong(song)) {
+    await fetchKugouStatus(statusCache.has(song.ncm_id) ? [] : [song.ncm_id]);
+    return { source: 'kugou', bound: false, ...getStatus(song.ncm_id) };
+  }
   const bound = await ensureNcmBound();
   const source = settings.likeMode === 'local' || !bound ? 'local' : 'ncm';
   if (source === 'ncm') await ensureNcmLiked();
@@ -548,6 +575,17 @@ export async function ensureLikeState(song) {
 /** 按当前设置执行一次红心；已绑定默认走网易云，未绑定走自建。 */
 export async function toggleLikeDefault(song, onChange, sourceOverride) {
   if (!auth.token) return toast('登录后才能使用喜欢功能');
+  if (isKugouSong(song)) {
+    try {
+      const previous = await ensureLikeState(song);
+      const result = await kugouWrite('library.favorite.set', { id: song.kugou_id, selected: !previous.liked });
+      setStatus(song.ncm_id, { liked: result.selected, faved: result.selected });
+      window.dispatchEvent(new CustomEvent('cm-likechange', { detail: { id: song.ncm_id, source: 'kugou' } }));
+      toast(result.selected ? '已加入我喜欢的音乐' : '已取消收藏');
+      onChange?.();
+    } catch (e) { toast(e.message); }
+    return;
+  }
   const source = sourceOverride || await likeSource();
   if (source === 'ncm') {
     await ensureNcmLiked();
@@ -645,12 +683,14 @@ export function openLikeMenu(song, onChange) {
  */
 export async function songListHTML(songs, { removable = false, offset = 0, likeSource: sourceOverride, cached = false, showLyric = false } = {}) {
   const st = cached ? songs.map(s => getStatus(s.ncm_id)) : await fetchStatus(songs.map(s => s.ncm_id));
-  const bound = auth.token ? (cached ? _ncmBoundToken === auth.token && _ncmBound === true : await ensureNcmBound()) : false;
+  const hasNcmSongs = songs.some(song => !isKugouSong(song));
+  const bound = auth.token && hasNcmSongs ? (cached ? _ncmBoundToken === auth.token && _ncmBound === true : await ensureNcmBound()) : false;
   const source = sourceOverride || (settings.likeMode === 'local' || !bound ? 'local' : 'ncm');
-  if (!cached && auth.token && (source === 'ncm' || bound)) await ensureNcmLiked().catch(() => {});
+  if (!cached && auth.token && hasNcmSongs && (source === 'ncm' || bound)) await ensureNcmLiked().catch(() => {});
   return `<div class="cm-songs">` + songs.map((s, i) => {
-    const liked = source === 'ncm' ? isNcmLiked(s.ncm_id) : st[i].liked;
-    const dot = bound && source === 'local' && isNcmLiked(s.ncm_id);
+    const kugou = isKugouSong(s);
+    const liked = source === 'ncm' && !kugou ? isNcmLiked(s.ncm_id) : st[i].liked;
+    const dot = !kugou && bound && source === 'local' && isNcmLiked(s.ncm_id);
     return `
     <div class="cm-song" data-i="${offset + i}" data-song-id="${esc(s.ncm_id)}">
       <div class="cm-song-cover">
@@ -670,7 +710,7 @@ export async function songListHTML(songs, { removable = false, offset = 0, likeS
       </div>
       ${s.mv ? `<button type="button" class="cm-song-mv" data-act="mv" data-i="${offset + i}" title="播放 MV" aria-label="播放 MV"><span class="material-icons-outlined" aria-hidden="true">smart_display</span></button>` : ''}
       <span class="cm-song-dur">${fmtDur(s.duration)}</span>
-      <span class="cm-song-like ${liked ? 'on' : ''}" data-act="like" data-i="${offset + i}" title="${source === 'ncm' ? '红心到网易云' : '加入 CurrentMusic 我喜欢'}">
+      <span class="cm-song-like ${liked ? 'on' : ''}" data-act="like" data-i="${offset + i}" title="${source === 'ncm' && !kugou ? '红心到网易云' : '加入 CurrentMusic 我喜欢'}">
         <span class="material-icons-outlined">${liked ? 'favorite' : 'favorite_border'}</span>
         ${dot ? '<i class="cm-ncmdot" title="已在网易云红心"></i>' : ''}
       </span>
@@ -723,7 +763,7 @@ export async function renderSongList(el, songs, opts = {}) {
       const act = e.target.closest('[data-act]');
       if (act && act.dataset.act === 'like') {
         e.stopPropagation();
-        toggleLikeDefault(songs[i], () => renderSongList(el, songs, opts), opts.likeSource);
+        toggleLikeDefault(songs[i], opts.onLikeChange || (() => renderSongList(el, songs, opts)), opts.likeSource);
         return;
       }
       if (act && act.dataset.act === 'remove') {
