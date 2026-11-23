@@ -32,6 +32,10 @@ GROUPS = {
     'lx': '客户端与资源', 'audio-sources': '客户端与资源', 'music-service': '外接音乐服务',
     'kugou': '酷狗概念版',
 }
+MUSIC_PLATFORM_GUIDES = {
+    'netease': ('netease-music-api', '网易云音乐 API'),
+    'kugou': ('kugou-concept-api', '酷狗概念版 API'),
+}
 GUIDES = {
     'community-api': '个人主页、横幅与帖子',
     'user-levels-api': '用户等级、试炼与发现排序',
@@ -54,6 +58,7 @@ GUIDES = {
     'lx-music-source': '落雪音乐自定义音源',
     'audio-sources-api': '自研音源导入与取链',
     'music-service-api': '外接音乐服务协议',
+    **dict(MUSIC_PLATFORM_GUIDES.values()),
     'realip': 'RealIP 规则', 'third-party-ncm-sync': '第三方客户端绑定同步', 'donations-api': '官方捐赠与第三方接入',
     'rooms-design': '一起听房间 API 与同步协议', 'network-lines-api': '线路测速',
 }
@@ -324,6 +329,21 @@ def write_music_service_specs(output):
     (output/'music-service.openapi.json').write_text(json.dumps(spec, ensure_ascii=False, indent=2))
 
 
+def music_platform_operations(provider):
+    entries = [
+        '| 操作 | 用途 | 通行证权限 | 写入确认 |',
+        '| --- | --- | --- | --- |',
+    ]
+    for operation, entry in cm_music_service.OPERATIONS.items():
+        if provider not in entry.providers:
+            continue
+        scope = f'`{entry.scope}`' if entry.scope else '公开'
+        confirmation = '`confirm: true`' if entry.write else '—'
+        entries.append(f'| `{operation}` | {entry.label} | {scope} | {confirmation} |')
+    return '\n'.join(entries)
+
+
+
 def build(output, upstream):
     output.mkdir(parents=True, exist_ok=True)
     for name in ('index.html', 'site.css'):
@@ -356,22 +376,37 @@ def build(output, upstream):
     sidebar = ['- **开始接入**', '  - [概览](README.md)', '  - [快速开始](quickstart.md)',
                '  - [认证、错误与请求约定](conventions.md)', '  - [接口完整索引](endpoints.md)', '- **自有后端接口**']
     endpoint_index = ['# 接口完整索引', '', '从实际路由自动构建；路径占位符按各接口业务解释。', '', '| 方法 | 路径 | 分类 |', '| --- | --- | --- |']
+    platform_route_groups = {'网易云绑定与同步': 'netease', '酷狗概念版': 'kugou'}
+    platform_routes = {}
     for i,(group,articles) in enumerate(sorted(own.items())):
         filename = f'backend-{i}.md'
         (output/filename).write_text(f'# {group}\n\n'+ '\n\n'.join(articles))
-        sidebar.append(f'  - [{group} · {len(articles)} 项]({filename})')
+        if group in platform_route_groups:
+            platform_routes[platform_route_groups[group]] = f'  - [{group}专用路由 · {len(articles)} 项]({filename})'
+        else:
+            sidebar.append(f'  - [{group} · {len(articles)} 项]({filename})')
         for m in (x for x in manifest if x['group']==group):
             endpoint_index.append(f"| {m['method']} | [`{m['path']}`]({filename}) | {group} |")
     sidebar += ['- **接入专题**']
+    provider_for_guide = {name: provider for provider, (name, _) in MUSIC_PLATFORM_GUIDES.items()}
     for name,title in GUIDES.items():
         src = ROOT/'docs'/f'{name}.md'
         if src.exists():
             text = src.read_text()
             text = re.sub(r'\]\((?:\./|docs/)?([a-z0-9-]+)\.md(#[^)]*)?\)',
                           lambda m: '](' + ('guide-' if m[1] in GUIDES else '') + m[1] + '.md' + (m[2] or '') + ')', text)
+            if name in provider_for_guide:
+                text = text.replace('<!-- music-service-operations -->',
+                                    music_platform_operations(provider_for_guide[name]))
+            else:
+                sidebar.append(f'  - [{title}](guide-{name}.md)')
             (output/f'guide-{name}.md').write_text(text)
-            sidebar.append(f'  - [{title}](guide-{name}.md)')
-    build_upstream(output, upstream, sidebar, endpoint_index, manifest)
+    for provider, (guide, title) in MUSIC_PLATFORM_GUIDES.items():
+        sidebar += [f'- **{title}**', f'  - [接入指南与接口清单](guide-{guide}.md)']
+        if provider in platform_routes:
+            sidebar.append(platform_routes[provider])
+        if provider == 'netease':
+            build_upstream(output, upstream, sidebar, endpoint_index, manifest)
     build_qq(output, sidebar, endpoint_index, manifest)
     sidebar += ['- **维护**', '  - [来源、许可与更新](about.md)']
     (output/'_sidebar.md').write_text('\n'.join(sidebar)+'\n')
@@ -432,7 +467,6 @@ def build_upstream(output, upstream, sidebar, index, manifest):
     with (ROOT/'docs/api-endpoint-phase-map.csv').open() as f:
         names = {r['path']:r['title'] for r in csv.DictReader(f)}
     groups = defaultdict(list)
-    sidebar += ['- **网易云代理（按权限分级）**']
     for path,(tier,ttl,phase) in sorted(cm_ncm_registry.REGISTRY.items()):
         title = names.get(path, path)
         text = [f'## /cm/ncm{path}', '', title, '', f'权限层级 **T{tier}** · 网关缓存 **{ttl} 秒** · 登记阶段 **{phase}**。', '']

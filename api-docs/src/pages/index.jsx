@@ -21,6 +21,19 @@ export default function Home(){
    <div className="requestCard"><div className="requestTop"><div className="windowDots"><b/><b/><b/></div><span>你的第一个 API 请求</span><small>HTTPS</small></div><div className="requestBody"><span className="codeLabel">REQUEST</span><p><em>GET</em> <span>/cm/health</span></p><pre><span className="codeDim">curl</span> https://music.20110208.xyz/cm/health</pre><div className="responseTitle"><span className="codeLabel">RESPONSE · 结构示例</span><span className="responseBadge">200 OK</span></div><pre className="jsonCode">{'{\n  '}<span>"ok"</span>{': '}<b>true</b>{',\n  '}<span>"now"</span>{': '}<strong>1793450000</strong>{'\n}'}</pre><div className="requestFoot"><span className="waveMark">▂ ▅ █ ▃ ▆</span><span>一个入口，连接整个 Current 生态。</span></div></div></div>
   </section>
   <section className="portalStats"><div><strong>{metadata.backendOperations}</strong><span>自有路由 / 方法组合</span></div><div><strong>{metadata.upstreamPaths}</strong><span>网易云代理登记路径</span></div><div><strong>4</strong><span>主站与镜像入口</span></div><p>从实际路由生成，<br/>让文档跟随实现更新。</p></section>
+  <section className="portalSection" aria-labelledby="music-platforms">
+   <div className="sectionTitle"><h2 id="music-platforms">音乐平台 API</h2></div>
+   <div className="entryGrid providerGrid">
+    <Link className="entryCard" to="/reference/guide-netease-music-api">
+     <h3>网易云音乐 API<span aria-hidden="true">↗</span></h3>
+     <p>曲库、个人授权及 T0–T3 代理接口。</p>
+    </Link>
+    <Link className="entryCard" to="/reference/guide-kugou-concept-api">
+     <h3>酷狗概念版 API<span aria-hidden="true">↗</span></h3>
+     <p>曲库、播放音质、逐字歌词和个人账号绑定。</p>
+    </Link>
+   </div>
+  </section>
   <section className="portalSection"><div className="sectionTitle"><div><span className="eyebrow">BUILD SOMETHING GOOD</span><h2>从你正在做的事情开始</h2></div><Link to="/reference/overview">阅读完整手册 →</Link></div><div className="entryGrid">{cards.map(([n,title,desc,route,icon])=><Link className="entryCard" to={'/reference/'+route} key={n}><div className="entryCardTop"><span className="entryIcon">{icon}</span><span className="entryNumber">{n}</span></div><h3>{title}<span>↗</span></h3><p>{desc}</p></Link>)}</div></section>
   <section className="portalBottom"><div><span className="eyebrow">DESIGNED FOR DEVELOPERS</span><h2>不止于列出接口。</h2><p>认证边界、错误处理、缓存策略与完整接入专题，<br/>帮你理解请求前后发生的每一步。</p></div><div className="bottomLinks"><Link to="/reference/conventions">认证、错误与请求约定 <span>→</span></Link><Link to="/reference/guide-third-party-ncm-sync">网易云绑定与同步 <span>→</span></Link><Link to="/reference/guide-rooms-design">一起听与房间协议 <span>→</span></Link></div></section>
  </main></Layout>

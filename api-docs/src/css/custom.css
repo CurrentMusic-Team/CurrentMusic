@@ -18,3 +18,8 @@
 .usage-table table { display: table; width: 100%; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .usage-table :is(td, th) { text-align: right; }
 .usage-table th:first-child { text-align: left; }
+
+.providerGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 480px) {
+  .providerGrid { grid-template-columns: 1fr; }
+}
