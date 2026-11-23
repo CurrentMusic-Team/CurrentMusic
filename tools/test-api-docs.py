@@ -77,6 +77,26 @@ class DocumentationTests(unittest.TestCase):
             self.assertEqual(published, set(schema))
             self.assertEqual(set(services), set(schema['/cm/music-service/v1/{operation}']['post']
                                                 ['parameters'][0]['schema']['enum']))
+            sidebar = (output/'_sidebar.md').read_text()
+            groups = dict(re.findall(r'^- \*\*(.*?)\*\*\n((?:  - [^\n]*\n)*)', sidebar, flags=re.M))
+            protocol = (output/'guide-music-service-api.md').read_text()
+            for provider, (guide, title) in docs.MUSIC_PLATFORM_GUIDES.items():
+                filename = f'guide-{guide}.md'
+                platform = (output/filename).read_text()
+                operations = platform.split('## 接口清单\n', 1)[1].split('## 服务方配置\n', 1)[0]
+                self.assertEqual(
+                    set(re.findall(r'^\| `([a-z.]+)` \|', operations, flags=re.M)),
+                    {name for name, entry in services.items() if provider in entry['providers']},
+                )
+                self.assertIn(f'"provider":"{provider}"', platform)
+                self.assertIn(f'({filename})', protocol)
+                self.assertIn(f'({filename})', groups[title])
+                self.assertNotIn(f'({filename})', groups['接入专题'])
+            for tier in range(4):
+                link = f'(netease-t{tier}.md)'
+                self.assertIn(link, groups['网易云音乐 API'])
+                self.assertNotIn(link, groups['酷狗概念版 API'])
+            self.assertNotIn('/cm/kugou/account', protocol)
             self.assertTrue({'/cm/audio-sources', '/cm/audio-sources/currentmusic-engine/resolve'}
                             <= {item['path'] for item in manifest if item['method'] == 'GET'})
             self.assertIn('GET | `/cm/qqmusic/song/url` | Bearer + QQ 会话', (output/'qqmusic.md').read_text())
