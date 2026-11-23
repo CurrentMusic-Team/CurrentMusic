@@ -77,6 +77,7 @@ export async function render(el, params = []) {
         <span slot="icon" class="material-icons-outlined" aria-hidden="true">search</span>搜索
       </mdui-button>
     </form>
+    <a class="cm-sec-more" href="#/kugou">搜索酷狗音乐</a>
     <div id="sugBox"></div>
     <div id="histBox"></div>
     <details id="matchLocal" class="cm-search-local">

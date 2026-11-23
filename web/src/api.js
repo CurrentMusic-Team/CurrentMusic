@@ -112,8 +112,8 @@ window.__cmHttpDone = function (id, status, body) {
   else p.reject(Object.assign(new Error((data && data.error) || `HTTP ${status}`), { status, code: data?.code }));
 };
 
-async function rawRequest(method, url, headers, bodyStr, keepalive = false) {
-  if (bridged) {
+async function rawRequest(method, url, headers, bodyStr, keepalive = false, redirect) {
+  if (bridged && redirect !== 'error') {
     return new Promise((resolve, reject) => {
       const id = 'r' + (++seq);
       pending.set(id, { resolve, reject });
@@ -121,7 +121,7 @@ async function rawRequest(method, url, headers, bodyStr, keepalive = false) {
     });
   }
   const requestHeaders = { ...(bodyStr ? { 'Content-Type': 'application/json' } : {}), ...(headers || {}) };
-  const r = await fetch(url, { method, headers: requestHeaders, body: bodyStr || undefined, keepalive });
+  const r = await fetch(url, { method, headers: requestHeaders, body: bodyStr || undefined, keepalive, redirect });
   let data = null;
   try { data = await r.json(); } catch { /* 空体 */ }
   if (r.ok) return data;
@@ -131,7 +131,7 @@ async function rawRequest(method, url, headers, bodyStr, keepalive = false) {
 let onAuthExpired = null;
 export function setAuthExpiredHandler(fn) { onAuthExpired = fn; }
 
-export async function call(method, path, { body, auth: needAuth = false, keepalive = false, base = settings.base } = {}) {
+export async function call(method, path, { body, auth: needAuth = false, keepalive = false, base = settings.base, redirect } = {}) {
   const headers = {};
   // 记录“请求发出时是否带过 token”：只有带过 token 的 401 才是会话失效；
   // 游客（本来就没登录）的 401 交给播放等入口自行引导登录，不能报“登录已失效”。
@@ -139,7 +139,7 @@ export async function call(method, path, { body, auth: needAuth = false, keepali
   if (hadToken) headers.Authorization = 'Bearer ' + auth.token;
   const bodyStr = body !== undefined ? JSON.stringify(body) : '';
   try {
-    return await rawRequest(method, base + path, headers, bodyStr, keepalive);
+    return await rawRequest(method, base + path, headers, bodyStr, keepalive, redirect);
   } catch (e) {
     // 401 有两种来源：项目会话失效（该提示重新登录）与「尚未绑定网易云」（该引导去绑定）。
     // 后者按状态码一律当成会话失效会误报「登录已失效」，所以按文案区分。

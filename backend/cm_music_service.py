@@ -7,6 +7,7 @@ import re
 from urllib.parse import urlencode, urlsplit
 
 import cm_db
+import cm_kugou
 import cm_ncm
 import cm_passport
 import cm_qq
@@ -58,13 +59,16 @@ def descriptor(origin):
     client = app(origin)
     usable_scopes = set(cm_passport.scope_names(client["scopes"])) if client else set()
     platforms = {}
-    for provider in ("netease", "qqmusic"):
+    for provider in ("netease", "qqmusic", "kugou"):
         if provider == "qqmusic" and not cm_qq.BASE:
             continue
+        if provider == "kugou" and not cm_kugou.base():
+            continue
         platforms[provider] = [
-            {"id": key, "label": op.label, "scope": op.scope or None, "write": op.write}
+            {"id": key, "label": op.label, "scope": op.scope or None, "write": op.write,
+             **({"kinds": ["song"]} if provider == "kugou" and key == "catalog.search" else {})}
             for key, op in OPERATIONS.items()
-            if provider in op.providers and media_enabled(op.media) and (not op.scope or op.scope in usable_scopes)
+            if provider in op.providers and operation_enabled(provider, op) and (not op.scope or op.scope in usable_scopes)
         ]
     base = issuer(origin)
     return {
@@ -437,8 +441,8 @@ def cloud(_provider, data, uid, ip):
 
 BOTH = ("netease", "qqmusic")
 OPERATIONS = {
-    "catalog.search": Operation("搜索", search, providers=BOTH),
-    "catalog.track": Operation("歌曲详情", details("song"), providers=BOTH),
+    "catalog.search": Operation("搜索", search, providers=(*BOTH, "kugou")),
+    "catalog.track": Operation("歌曲详情", details("song"), providers=(*BOTH, "kugou")),
     "catalog.album": Operation("专辑", details("album"), providers=BOTH),
     "catalog.artist": Operation("歌手", details("artist"), providers=BOTH),
     "catalog.playlist": Operation("公开歌单", details("playlist"), providers=BOTH),
@@ -449,8 +453,8 @@ OPERATIONS = {
     "track.lyrics": Operation("歌词", lyrics, providers=BOTH, media="lyrics"),
     "track.comments": Operation("歌曲评论", comments),
     "track.comment.add": Operation("发表评论", comment_add, "music.comment.write", write=True),
-    "playback.qualities": Operation("音质档位", qualities, "music.play", media="playback"),
-    "playback.resolve": Operation("播放取址", play, "music.play", media="playback"),
+    "playback.qualities": Operation("音质档位", qualities, "music.play", providers=("netease", "kugou"), media="playback"),
+    "playback.resolve": Operation("播放取址", play, "music.play", providers=("netease", "kugou"), media="playback"),
     "playback.mv": Operation("MV 取址", mv, "music.play", media="mv"),
     "playback.download": Operation("下载取址", download, "music.download", media="download"),
     "library.favorites": Operation("收藏", favorites, "music.library.read"),
@@ -484,13 +488,40 @@ def principal(header, scope):
     return grant["uid"]
 
 
-def dispatch(operation, body, header, ip):
+def operation_enabled(provider, entry):
+    if provider == "kugou":
+        return bool(cm_kugou.base()) and (not entry.media or cm_kugou.playback_enabled())
+    return media_enabled(entry.media)
+
+
+def kugou_operation(operation, data, uid, origin):
+    entry = OPERATIONS.get(operation)
+    if not entry or "kugou" not in entry.providers or not operation_enabled("kugou", entry):
+        error(404, "unsupported_operation", "该服务未开放此酷狗能力")
+    if not isinstance(data, dict):
+        error(400, "invalid_input", "需要 input 对象")
+    if entry.scope and not cm_kugou.authorized_user(cm_db.get_user(uid)):
+        error(403, "account_access_restricted", "当前账号没有播放权限")
+    if operation == "catalog.search":
+        query = string(data, "query", 60)
+        if not query or string(data, "kind", 15, default="song") != "song":
+            error(400, "invalid_input", "酷狗当前支持单曲搜索")
+        return cm_kugou.search(query, *paging(data))
+    ident = reference(data)
+    if operation == "catalog.track":
+        return {"resource": cm_kugou.track(ident)[0]}
+    if operation == "playback.qualities":
+        return cm_kugou.qualities(ident)
+    return cm_kugou.resolve(ident, string(data, "quality", 16, default="auto"), uid, origin)
+
+
+def dispatch(operation, body, header, ip, *, origin=""):
     entry = OPERATIONS.get(operation)
     provider = body.get("provider") if isinstance(body, dict) else None
     data = body.get("input", {}) if isinstance(body, dict) else None
     if not isinstance(data, dict) or not isinstance(provider, str):
         error(400, "invalid_input", "需要 provider 和 input 对象")
-    if not entry or provider not in entry.providers or not media_enabled(entry.media):
+    if not entry or provider not in entry.providers or not operation_enabled(provider, entry):
         error(404, "unsupported_operation", "该服务或平台未开放此能力")
     if provider == "qqmusic" and not cm_qq.BASE:
         error(404, "unsupported_operation", "该服务未启用 QQ 曲库")
@@ -498,7 +529,11 @@ def dispatch(operation, body, header, ip):
     if entry.write and body.get("confirm") is not True:
         error(400, "confirmation_required", "需要确认本次写入")
     try:
+        if provider == "kugou":
+            return kugou_operation(operation, data, uid, origin)
         return entry.run(provider, data, uid, ip)
+    except cm_kugou.Error as exc:
+        error(exc.status, exc.code, str(exc))
     except cm_qq.Error as exc:
         error(exc.status, "upstream_error", exc.body["error"])
     except cm_ncm.NcmError as exc:

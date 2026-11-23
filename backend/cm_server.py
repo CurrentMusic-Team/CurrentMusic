@@ -35,6 +35,7 @@ import cm_lddc
 import cm_levels
 import cm_mail
 import cm_music_service
+import cm_kugou
 import cm_ncm
 import cm_songinfo
 import cm_binding_import
@@ -1271,7 +1272,7 @@ def jresp(handler, code, obj, cache_control=None, extra_headers=None):
         cache_control = "no-store"
     if path == "/audio-sources" or path.startswith("/audio-sources/"):
         cache_control = "no-store"
-    if path.startswith("/music-service/") or path == "/passport/token":
+    if path.startswith(("/music-service/", "/kugou/")) or path == "/passport/token":
         cache_control = "no-store"
     if path.rstrip("/") == "/feedback" or path.startswith(("/feedback/", "/admin/feedback/")):
         cache_control = "no-store"
@@ -2254,12 +2255,34 @@ def route(handler, method):
     if path == "/music-service/connect" and method == "GET":
         return hresp(handler, 200, cm_music_service.connection_page(base_url(handler)))
 
+    if path == "/kugou/capabilities" and method == "GET":
+        return jresp(handler, 200, {"catalog": bool(cm_kugou.base()), "playback": cm_kugou.playback_enabled()})
+
+    kugou_operation = re.fullmatch(r"/kugou/v1/([a-z.]{3,64})", path)
+    if kugou_operation and method == "POST":
+        name = kugou_operation[1]
+        try:
+            entry = cm_music_service.OPERATIONS.get(name)
+            uid = (require_user(handler, allow_query=False)["id"]
+                   if entry and "kugou" in entry.providers and entry.scope else 0)
+            result = cm_music_service.kugou_operation(name, body, uid, base_url(handler))
+        except (cm_music_service.Error, cm_kugou.Error) as exc:
+            return jresp(handler, exc.status, {"code": exc.code, "error": str(exc)})
+        return jresp(handler, 200, result)
+
+    kugou_media = re.fullmatch(r"/kugou/media/([A-Za-z0-9_-]{32})", path)
+    if kugou_media and method == "GET":
+        try:
+            return cm_kugou.stream(handler, kugou_media[1], lambda uid: cm_kugou.authorized_user(cm_db.get_user(uid)))
+        except cm_kugou.Error as exc:
+            return jresp(handler, exc.status, {"code": exc.code, "error": str(exc)})
+
     operation = re.fullmatch(r"/music-service/v1/([a-z.]{3,64})", path)
     if operation and method == "POST":
         try:
             result = cm_music_service.dispatch(
                 operation[1], body, handler.headers.get("Authorization", ""),
-                cm_ncm_gateway.client_ip(handler))
+                cm_ncm_gateway.client_ip(handler), origin=base_url(handler))
         except cm_music_service.Error as exc:
             return jresp(handler, exc.status, {"code": exc.code, "error": str(exc)})
         return jresp(handler, 200, result)
@@ -3001,6 +3024,9 @@ def route(handler, method):
             ("GET", "/music-service/descriptor", "公开", "外接音乐服务协议 v1 描述与已启用能力"),
             ("GET", "/music-service/connect", "公开", "由流声引擎侧发起外接音乐服务连接"),
             ("POST", "/music-service/v1/{operation}", "按能力", "调用白名单中的音乐能力。详见 /api-docs/reference/guide-music-service-api/"),
+            ("GET", "/kugou/capabilities", "公开", "探测酷狗单曲曲库与播放能力。"),
+            ("POST", "/kugou/v1/{operation}", "按能力", "酷狗曲库和 Web 取址，播放使用 CurrentMusic Bearer。"),
+            ("GET", "/kugou/media/{ticket}", "播放票据", "短时有效的 HTTPS 媒体地址，支持 HEAD 和单段 Range。"),
             ("GET", "/audio-sources", "Bearer", "自研音源 v1 导入目录，返回音源名称和适用平台。详见 /api-docs/reference/guide-audio-sources-api/"),
             ("GET", "/audio-sources/currentmusic-engine/resolve", "Bearer", "已导入的流声引擎音源取链，接受 id、level、refresh、supportsDolby；网易云曲库。详见 /api-docs/reference/guide-audio-sources-api/"),
             ("GET", "/badges/powered-by.svg", "公开", "流声引擎署名徽章，返回 SVG；lang 可选 zh-CN（默认）或 en。嵌入示例 /api-docs/reference/guide-engine-badge-api/"),
@@ -6273,7 +6299,7 @@ class Handler(BaseHTTPRequestHandler):
     def _run(self, method):
         path = self.path.split("?", 1)[0].rstrip("/")
         if path.startswith("/"):
-            cm_usage.note_api(path)
+            cm_usage.note_api("/kugou/media" if path.startswith("/kugou/media/") else path)
         # HEAD 语义 = 与 GET 同样的响应头、但不带响应体。BaseHTTPRequestHandler 不会自动
         # 抑制响应体，故这里把 wfile 换成一个丢弃写入的包装（Content-Length 仍如实声明）。
         if method == "HEAD":
@@ -6302,7 +6328,10 @@ class Handler(BaseHTTPRequestHandler):
         except cm_qq.Error as e:
             jresp(self, e.status, e.body)
         except Exception as e:  # noqa: BLE001
-            if cm_qq.is_path(urlparse(self.path).path):
+            if urlparse(self.path).path.startswith("/kugou/"):
+                log.error("酷狗网关内部错误 %s", type(e).__name__)
+                jresp(self, 500, {"error": "酷狗音乐网关内部错误"})
+            elif cm_qq.is_path(urlparse(self.path).path):
                 log.error("QQ 网关内部错误 %s", type(e).__name__)
                 jresp(self, 500, {"error": "QQ 音乐网关内部错误"})
             else:
@@ -6352,6 +6381,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_request(self, code="-", size="-"):
         path = getattr(self, "path", "").split("?", 1)[0].rstrip("/")
+        if path.startswith("/kugou/media/"):
+            return
         if cm_qq.is_path(path):
             entry = cm_qq_registry.match(path[len(cm_qq_registry.PREFIX):])
             log.info("QQ %s %s %s", self.command, entry.path if entry else "-", code)
@@ -6360,7 +6391,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):  # 精简访问日志
         path = getattr(self, "path", "").split("?", 1)[0]
-        if cm_qq.is_path(path):
+        if path.startswith("/kugou/media/") or cm_qq.is_path(path):
             return
         log.info("%s %s %s", self.client_address[0], self.command, path)
 

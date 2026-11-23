@@ -88,6 +88,12 @@ with its own state directory and protected secret file. The nginx example
 includes a dedicated `/cm/qqmusic/` location without access logging or caching.
 See [QQ Music integration](../docs/qq-music-api.md) for account and API details.
 
+## KuGouMusicApi
+
+Run [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi) in concept mode (`platform=lite`) at `127.0.0.1:3201`. Configure `CM_KUGOU_BASE`, `CM_KUGOU_PLAYBACK` and `CM_KUGOU_COOKIE_FILE` from the backend environment template. Install `ffprobe` for full-track and quality checks. Use the `/cm/kugou/media/` Nginx location from the example for streaming and log redaction.
+
+Run `python3 tools/configure-kugou-cookie.py` on the server and enter the account's current SMS verification code at the terminal. The tool validates the playback session and atomically replaces `/etc/currentmusic/kugou-cookie` with a `0600` file. Ensure the backend service account can read it. Re-run the tool to replace an expired session. See the [music service protocol](../docs/music-service-api.md#酷狗音乐).
+
 ## LDDC word-by-word lyrics (optional)
 
 CurrentMusic already synthesizes per-character timing from line-level lyrics. For
