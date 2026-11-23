@@ -63,6 +63,12 @@ class DocumentationTests(unittest.TestCase):
             self.assertTrue((output/'guide-qq-music-api.md').is_file())
             self.assertTrue((output/'guide-audio-sources-api.md').is_file())
             self.assertTrue((output/'guide-music-service-api.md').is_file())
+            kugou_account = {(item["method"], item["path"]) for item in manifest
+                             if item["path"].startswith("/cm/kugou/account")}
+            self.assertEqual(kugou_account, {
+                ("GET", "/cm/kugou/account"), ("DELETE", "/cm/kugou/account"),
+                ("POST", "/cm/kugou/account/code"), ("POST", "/cm/kugou/account/verify"),
+            })
             self.assertTrue((output/'guide-community-api.md').is_file())
             self.assertIn('(guide-community-api.md)', (output/'_sidebar.md').read_text())
             services = json.loads((output/'music-service-capabilities.json').read_text())['operations']

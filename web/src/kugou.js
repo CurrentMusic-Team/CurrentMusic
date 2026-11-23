@@ -19,12 +19,20 @@ export function kugouQuality(value) {
 
 export async function kugouRequest(operation, body) {
   const base = settings.base, token = auth.token;
-  const needsAuth = /^(playback|library|history|roaming)\./.test(operation) || operation === 'discover.recommendations';
+  const needsAuth = /^(playback|library|history|roaming)\./.test(operation) || ['discover.recommendations', 'track.comment.add'].includes(operation);
   const response = await call(operation === 'capabilities' ? 'GET' : 'POST',
     operation === 'capabilities' ? '/kugou/capabilities' : '/kugou/v1/' + operation,
     { base, body, auth: needsAuth, keepalive: operation === 'history.record', redirect: 'error' });
   if (base !== settings.base || token !== auth.token) throw new Error('账号或服务器已切换，请重试');
   return response;
+}
+
+export async function kugouAccountRequest(method = 'GET', suffix = '', body) {
+  const base = settings.base, token = auth.token;
+  if (new URL(base).protocol !== 'https:') throw new Error('酷狗账号绑定需要 HTTPS 服务');
+  const data = await call(method, '/kugou/account' + suffix, { auth: true, base, body, redirect: 'error' });
+  if (base !== settings.base || token !== auth.token) throw new Error('账号或服务器已切换，请重试');
+  return data;
 }
 
 export function kugouSong(item) {

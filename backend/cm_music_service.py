@@ -8,6 +8,7 @@ from urllib.parse import urlencode, urlsplit
 
 import cm_db
 import cm_kugou
+import cm_kugou_account
 import cm_kugou_catalog
 import cm_kugou_library
 import cm_ncm
@@ -456,7 +457,7 @@ OPERATIONS = {
     "discover.playlists": Operation("推荐歌单", None, providers=("kugou",)),
     "track.lyrics": Operation("歌词", lyrics, providers=(*BOTH, "kugou"), media="lyrics"),
     "track.comments": Operation("歌曲评论", comments, providers=("netease", "kugou")),
-    "track.comment.add": Operation("发表评论", comment_add, "music.comment.write", write=True),
+    "track.comment.add": Operation("发表评论", comment_add, "music.comment.write", providers=("netease", "kugou"), write=True),
     "playback.qualities": Operation("音质档位", qualities, "music.play", providers=("netease", "kugou"), media="playback"),
     "playback.resolve": Operation("播放取址", play, "music.play", providers=("netease", "kugou"), media="playback"),
     "playback.mv": Operation("MV 取址", mv, "music.play", providers=("netease", "kugou"), media="mv"),
@@ -470,7 +471,7 @@ OPERATIONS = {
     "library.playlist.edit": Operation("编辑歌单", playlist_edit, "music.library.write", providers=("netease", "kugou"), write=True),
     "library.playlist.delete": Operation("删除歌单", playlist_delete, "music.library.write", providers=("netease", "kugou"), write=True),
     "library.playlist.tracks": Operation("修改歌单曲目", playlist_tracks, "music.library.write", providers=("netease", "kugou"), write=True),
-    "library.cloud": Operation("云盘曲库", cloud, "music.cloud.read", media="cloud"),
+    "library.cloud": Operation("云盘曲库", cloud, "music.cloud.read", providers=("netease", "kugou"), media="cloud"),
     "history.recent": Operation("最近播放", recent, "music.history.read", providers=("netease", "kugou")),
     "history.record": Operation("记录播放进度", history_record, "music.history.write", providers=("netease", "kugou"), write=True),
     "roaming.songs": Operation("私人漫游", roaming_songs, "music.library.read", providers=("netease", "kugou")),
@@ -563,6 +564,8 @@ def principal(header, scope):
 
 def operation_enabled(provider, entry):
     if provider == "kugou":
+        if entry.scope in ("music.comment.write", "music.cloud.read"):
+            return cm_kugou_account.enabled()
         return bool(cm_kugou.base()) and (entry.media not in ("playback", "mv") or cm_kugou.playback_enabled())
     return media_enabled(entry.media)
 
@@ -576,6 +579,13 @@ def kugou_operation(operation, data, uid, origin):
     if entry.scope:
         if not cm_kugou.authorized_user(cm_db.get_user(uid), scope_capability(entry.scope)):
             error(403, "account_access_restricted", "当前账号的这项服务访问权限已被限制")
+    if operation == "library.cloud":
+        return cm_kugou_account.cloud(uid, *paging(data))
+    if operation == "track.comment.add":
+        content = string(data, "text", 300)
+        if not content.strip():
+            error(400, "invalid_input", "评论不能为空")
+        return cm_kugou_account.comment(uid, _kugou_track_id(data), content)
     if operation.startswith(("library.", "history.")):
         return _kugou_personal(operation, data, uid)
     if operation in ("catalog.search", "discover.suggest"):

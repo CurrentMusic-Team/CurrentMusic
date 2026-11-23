@@ -1,3 +1,4 @@
+from base64 import b64encode
 import io
 import json
 import os
@@ -160,6 +161,19 @@ class KugouCatalogueTests(unittest.TestCase):
         self.assertEqual(result["lines"][0]["w"], [[1000, "甲"], [1100, "乙"]])
         self.assertNotIn("fixture-key", json.dumps(result))
 
+
+    def test_krc_translation_stays_on_original_line_across_blank_timestamps(self):
+        aux = {"content": [
+            {"type": 1, "language": 0, "lyricContent": [["早安"], [], ["晚上好"]]},
+            {"type": 0, "language": 0, "lyricContent": [["o", "ha", "yo"], [], ["kon", "ban", "wa"]]},
+        ]}
+        tag = b64encode(json.dumps(aux).encode()).decode()
+        raw = f"[language:{tag}]\r\n[1000,350]<0,100,0>おはよう\r\n[2000,300]\r\n[3000,450]<0,200,0>こんばんは"
+        lines = catalog._krc_lines(raw)
+        self.assertEqual([(line["t"], line["trans"], line["roma"]) for line in lines],
+                         [(1000, "早安", "o ha yo"), (3000, "晚上好", "kon ban wa")])
+        self.assertEqual(lines[0]["w"], [[1000, "おはよう"]])
+        self.assertEqual(catalog._krc_lines("[language:@bad]\n[1000,350]<0,100,0>Hi")[0]["trans"], "")
 
     def test_private_collection_is_excluded_before_loading_tracks(self):
         collection = "collection_3_100_1_0"

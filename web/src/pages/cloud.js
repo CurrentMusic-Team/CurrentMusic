@@ -6,6 +6,10 @@
 // 未接入（下一轮）：上传三步 /cloud/upload/token → 直传对象存储 → /cloud/upload/complete，
 // 以及 /cloud（单文件直传）。原因是它们需要在前端算 MD5，而 WebCrypto 不提供 MD5
 // （只有 SHA 系列），必须自带实现；这件事要单独做并单独验证，不混在这一轮里假装完成。
+import { kugouAccountRequest, kugouRequest, kugouSong } from '../kugou.js';
+import { openKugouAccount } from '../kugou-account.js';
+import { musicPlatform } from '../music-platform.js';
+import { player } from '../player.js';
 import { api, auth } from '../api.js';
 import { md5Hex } from '../md5.js';
 import { esc, toast, fmtCount, skelList, confirmDialog, promptDialog } from '../ui.js';
@@ -20,15 +24,16 @@ const fmtSize = n => {
   return `${v} B`;
 };
 
-function needBind(el, text = '云盘与电台跟你的网易云账号绑定，请先绑定') {
+function needBind(el, text = '云盘与电台跟你的网易云账号绑定，请先绑定', button = '去绑定网易云') {
   el.innerHTML = `<div class="cm-login-tip page">
     <span class="material-icons-outlined" style="font-size:calc(44px * var(--cm-fs, 1))">cloud</span>
     <div>${esc(text)}</div>
-    <mdui-button variant="filled" href="#/user">去绑定网易云</mdui-button></div>`;
+    <mdui-button variant="filled" href="#/user">${esc(button)}</mdui-button></div>`;
 }
 
 export async function render(el, params = {}) {
-  if (!auth.token) { needBind(el, '登录后可查看音乐云盘'); return; }
+  if (!auth.token) { needBind(el, '登录后可查看音乐云盘', '去登录'); return; }
+  if (musicPlatform() === 'kugou') return renderKugouCloud(el);
   let bind = { bound: false };
   try { bind = await api.bindStatus(); } catch { /* 未绑定 */ }
   if (!bind.bound) { needBind(el); return; }
@@ -255,5 +260,74 @@ export async function render(el, params = {}) {
           .catch(e => toast(/绑定|401/.test(e.message) ? '需先绑定网易云账号' : e.message)),
       });
     });
+  }
+}
+
+
+async function renderKugouCloud(el) {
+  el.innerHTML = `
+    <div class="cm-sqtabs" id="clTabs"><button class="cm-sqtab on">音乐云盘</button></div>
+    <div id="clBody">${skelList(6)}</div>`;
+  const body = el.querySelector('#clBody');
+  const showLink = () => {
+    body.innerHTML = `<div class="cm-login-tip page"><span class="material-icons-outlined">cloud</span>
+      <div>绑定酷狗概念版账号后可查看个人云盘</div>
+      <mdui-button variant="filled" id="clKugouBind">去绑定酷狗</mdui-button></div>`;
+    body.querySelector('#clKugouBind').onclick = () => openKugouAccount(() => renderKugouCloud(el));
+  };
+  let rows = [];
+  try {
+    const state = await kugouAccountRequest();
+    if (!body.isConnected) return;
+    if (!state.enabled) throw new Error('此服务暂未开启酷狗个人云盘');
+    if (!state.bound) { showLink(); return; }
+    await load(0);
+  } catch (error) {
+    body.innerHTML = `<div class="cm-empty">${esc(error.message)}</div>`;
+  }
+
+  async function load(offset) {
+    try {
+      const result = await kugouRequest('library.cloud', { offset, limit: 50 });
+      if (!body.isConnected) return;
+      if (!offset) rows = [];
+      const start = rows.length;
+      rows.push(...result.items);
+      if (!offset) {
+        const storage = result.capacityBytes > 0 ? `已用 ${fmtSize(result.usedBytes)} / ${fmtSize(result.capacityBytes)} · ` : '';
+        body.innerHTML = `<div class="cm-sq-stats"><span class="material-icons-outlined">cloud</span>
+          ${storage}${result.total ?? rows.length} 首</div>`;
+      }
+      if (!rows.length) body.insertAdjacentHTML('beforeend', '<div class="cm-empty small">云盘还是空的</div>');
+      body.querySelector('#clMore')?.remove();
+      body.insertAdjacentHTML('beforeend', result.items.map((song, index) => `
+        <div class="cm-lm-item" data-index="${start + index}">
+          <div class="cm-lm-lyric">${esc(song.name)}</div>
+          <div class="cm-lm-meta">
+            <span>${esc(song.artists)}${song.size ? ` · ${fmtSize(song.size)}` : ''}</span>
+            ${song.catalogId ? '<span><button type="button" class="cm-si-act" data-play>播放已匹配歌曲</button></span>' : ''}
+          </div>
+        </div>`).join(''));
+      if (!offset) body.addEventListener('click', event => {
+        const action = event.target.closest('[data-play]');
+        if (!action) return;
+        const item = rows[Number(action.closest('[data-index]').dataset.index)];
+        const song = item && kugouSong({ ...item, id: item.catalogId });
+        if (song) player.playSong(song);
+      });
+      if (result.nextOffset != null) {
+        body.insertAdjacentHTML('beforeend',
+          '<div class="cm-sq-more" id="clMore"><mdui-button variant="tonal">加载更多</mdui-button></div>');
+        body.querySelector('#clMore mdui-button').onclick = async event => {
+          const button = event.currentTarget;
+          button.loading = true;
+          try { await load(result.nextOffset); } finally { button.loading = false; }
+        };
+      }
+    } catch (error) {
+      if (error.code === 'binding_required') showLink();
+      else if (offset) toast(error.message);
+      else throw error;
+    }
   }
 }
