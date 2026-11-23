@@ -1,5 +1,6 @@
 // MV 详情页和歌曲行浮层共用播放器，歌曲行通过事件传入数据。
 import { api } from './api.js';
+import { isKugouSong, kugouMediaUrl, kugouRequest } from './kugou.js';
 import { esc, toast } from './ui.js';
 import { on, player } from './player.js';
 import './mv.css';
@@ -7,7 +8,7 @@ import './mv.css';
 let modal = null;
 let activeVideo = null;
 
-export function mountMvPlayer(stage, { id, title, cover, autoplay = false }) {
+export function mountMvPlayer(stage, { id, title, cover, autoplay = false, provider }) {
   stage.innerHTML = `
     <video class="cm-mv-video" aria-label="${esc(title)}" playsinline preload="metadata"${cover ? ` poster="${esc(cover)}"` : ''}></video>
     <span class="cm-mv-quality" hidden></span>
@@ -59,10 +60,12 @@ export function mountMvPlayer(stage, { id, title, cover, autoplay = false }) {
     paint('正在获取播放地址…');
     try {
       // 上游可降级返回，清晰度以响应中的 r 为准。
-      const { data } = await api.ncm('/mv/url', { id, r: 1080 });
+      const data = provider === 'kugou'
+        ? await kugouRequest('playback.mv', { id })
+        : (await api.ncm('/mv/url', { id, r: 1080 })).data;
       if (!active()) return;
       if (!data?.url) throw new Error('暂无播放地址，可能受版权或地区限制');
-      video.src = data.url;
+      video.src = provider === 'kugou' ? kugouMediaUrl(data.url) : data.url;
       video.controls = true;
       const resolution = Number(data.r);
       if (Number.isFinite(resolution) && resolution > 0) {
@@ -161,7 +164,7 @@ export function openMv(song) {
   artist.textContent = song.artists || '';
   artist.hidden = !song.artists;
   modal.dispose = mountMvPlayer(modal.overlay.querySelector('.cm-mv-stage'), {
-    id: song.mv, title, cover: song.pic, autoplay: true,
+    id: song.mv, title, cover: song.pic, autoplay: true, provider: isKugouSong(song) ? 'kugou' : 'netease',
   });
   modal.close.focus();
 }

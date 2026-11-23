@@ -445,6 +445,7 @@ BOTH = ("netease", "qqmusic")
 OPERATIONS = {
     "catalog.search": Operation("搜索", search, providers=(*BOTH, "kugou")),
     "catalog.track": Operation("歌曲详情", details("song"), providers=(*BOTH, "kugou")),
+    "catalog.video": Operation("MV 详情", None, providers=("kugou",)),
     "catalog.album": Operation("专辑", details("album"), providers=(*BOTH, "kugou")),
     "catalog.artist": Operation("歌手", details("artist"), providers=(*BOTH, "kugou")),
     "catalog.playlist": Operation("公开歌单", details("playlist"), providers=(*BOTH, "kugou")),
@@ -458,7 +459,7 @@ OPERATIONS = {
     "track.comment.add": Operation("发表评论", comment_add, "music.comment.write", write=True),
     "playback.qualities": Operation("音质档位", qualities, "music.play", providers=("netease", "kugou"), media="playback"),
     "playback.resolve": Operation("播放取址", play, "music.play", providers=("netease", "kugou"), media="playback"),
-    "playback.mv": Operation("MV 取址", mv, "music.play", media="mv"),
+    "playback.mv": Operation("MV 取址", mv, "music.play", providers=("netease", "kugou"), media="mv"),
     "playback.download": Operation("下载取址", download, "music.download", media="download"),
     "library.favorites": Operation("收藏", favorites, "music.library.read", providers=("netease", "kugou")),
     "library.favorite.status": Operation("查询收藏状态", None, "music.library.read", providers=("kugou",)),
@@ -472,7 +473,9 @@ OPERATIONS = {
     "library.cloud": Operation("云盘曲库", cloud, "music.cloud.read", media="cloud"),
     "history.recent": Operation("最近播放", recent, "music.history.read", providers=("netease", "kugou")),
     "history.record": Operation("记录播放进度", history_record, "music.history.write", providers=("netease", "kugou"), write=True),
-    "roaming.songs": Operation("私人漫游", roaming_songs, "music.library.read"),
+    "roaming.songs": Operation("私人漫游", roaming_songs, "music.library.read", providers=("netease", "kugou")),
+    "roaming.stations": Operation("漫游电台", None, "music.library.read", providers=("kugou",)),
+    "roaming.skip": Operation("隐藏漫游曲目", None, "music.library.write", providers=("kugou",), write=True),
 }
 
 
@@ -560,7 +563,7 @@ def principal(header, scope):
 
 def operation_enabled(provider, entry):
     if provider == "kugou":
-        return bool(cm_kugou.base()) and (entry.media != "playback" or cm_kugou.playback_enabled())
+        return bool(cm_kugou.base()) and (entry.media not in ("playback", "mv") or cm_kugou.playback_enabled())
     return media_enabled(entry.media)
 
 
@@ -590,10 +593,33 @@ def kugou_operation(operation, data, uid, origin):
     if operation == "discover.charts":
         return cm_kugou_catalog.charts()
     if operation == "discover.recommendations":
-        return cm_kugou_catalog.recommendations()
+        result = cm_kugou_catalog.recommendations()
+        excluded = cm_kugou_library.roaming_exclusions(uid)
+        result["items"] = [item for item in result["items"] if item["id"] not in excluded]
+        return result
     if operation == "discover.playlists":
         return cm_kugou_catalog.featured_playlists()
+    if operation == "roaming.stations":
+        return cm_kugou_catalog.radio_stations()
+    if operation == "roaming.skip":
+        return cm_kugou_library.roaming_skip(uid, _kugou_track_id(data))
+    if operation == "roaming.songs":
+        station = string(data, "station", 18)
+        if station and not re.fullmatch(r"[1-9][0-9]{0,14}_[1-9][0-9]?", station):
+            error(400, "invalid_input", "电台 ID 格式错误")
+        seed = _kugou_track_id({"id": data["seedId"]}) if "seedId" in data else ""
+        sources = []
+        if not station:
+            sources = [seed] if seed else [item["id"] for item in cm_kugou_library.recent(uid, 0, 3)["items"]]
+        excluded = cm_kugou_library.roaming_exclusions(uid)
+        if "excludeIds" in data and data["excludeIds"] != []:
+            excluded.update(_kugou_track_ids(data, "excludeIds", maximum=100))
+        excluded.update(sources)
+        return cm_kugou_catalog.radio(integer(data, "limit", 1, 30, 20), integer(data, "offset", 0, 10000, 0),
+                                     [ident.split("-")[1] for ident in sources], excluded, station)
     ident = reference(data)
+    if operation == "catalog.video":
+        return cm_kugou_catalog.video(ident)
     if operation == "catalog.track":
         return {"resource": cm_kugou.track(ident)[0]}
     if operation.startswith("catalog."):
@@ -606,6 +632,8 @@ def kugou_operation(operation, data, uid, origin):
             error(400, "invalid_input", "酷狗评论支持热门或推荐排序，以及页码分页")
         return cm_kugou_catalog.comments(ident, integer(data, "page", 1, 500, 1),
                                         integer(data, "limit", 1, 50, 20))
+    if operation == "playback.mv":
+        return cm_kugou.resolve_video(ident, uid, origin)
     if operation == "playback.qualities":
         return cm_kugou.qualities(ident)
     if operation == "playback.resolve":

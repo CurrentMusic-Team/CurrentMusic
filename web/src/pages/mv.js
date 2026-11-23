@@ -3,6 +3,8 @@
 // 列表：/mv/all、/mv/first、/mv/exclusive/rcmd、/mv/sublist（T1 账号读）
 // 评论走通用抽屉（CM 类型 1 = MV），与歌曲/专辑/歌单同一套实现。
 import { api, auth } from '../api.js';
+import { kugouRequest } from '../kugou.js';
+import { musicPlatform } from '../music-platform.js';
 import { esc, toast, fmtCount, fmtDur, skelVideo, skelGrid } from '../ui.js';
 import { openMlog } from '../mlog.js';
 import { mountMvPlayer } from '../mv.js';
@@ -11,7 +13,7 @@ const AREAS = ['全部', '内地', '港台', '欧美', '日本', '韩国'];
 const ORDERS = ['上升最快', '最热', '最新', '独家'];
 
 const mvCard = m => `
-  <a class="cm-plcard cm-mv-card" href="#/mv/${esc(m.id)}">
+  <a class="cm-plcard cm-mv-card" href="${m.provider === 'kugou' ? '#/kugou/mv/' : '#/mv/'}${esc(m.id)}">
     <div class="cm-plcover cm-cover-16x9">
       ${m.cover ? `<img src="${esc(m.cover)}?param=400y225" alt="" loading="lazy" onerror="this.remove()">` : ''}
       <span class="material-icons-outlined" aria-hidden="true">videocam</span>
@@ -261,7 +263,81 @@ async function renderList(el, params = {}) {
   await load(0, false);
 }
 
+async function renderKugouDetail(el, id) {
+  el.innerHTML = `<div class="cm-mv-page">${skelVideo()}</div>`;
+  try {
+    const { resource } = await kugouRequest('catalog.video', { id });
+    if (!el.isConnected) return;
+    el.firstElementChild.innerHTML = `
+      <div class="cm-mv-stage" id="mvBox"></div>
+      <header class="cm-mv-info">
+        <div>
+          <span class="cm-mv-kicker"><span class="material-icons-outlined" aria-hidden="true">smart_display</span>音乐视频</span>
+          <h2>${esc(resource.name)}</h2>
+          ${resource.artists ? `<div class="cm-detail-sub">${esc(resource.artists)}</div>` : ''}
+        </div>
+      </header>`;
+    const dispose = mountMvPlayer(el.querySelector('#mvBox'), { id, title: resource.name, cover: resource.artwork, provider: 'kugou' });
+    const parent = el.parentNode;
+    if (!parent) { dispose(); return; }
+    const observer = new MutationObserver(() => {
+      if (el.isConnected) return;
+      observer.disconnect();
+      dispose();
+    });
+    observer.observe(parent, { childList: true });
+  } catch (error) {
+    el.innerHTML = `<div class="cm-empty">MV 加载失败：${esc(error.message)}</div>`;
+  }
+}
+
+function renderKugouList(el) {
+  el.innerHTML = `
+    <form class="cm-search-bar" id="mvSearch">
+      <mdui-text-field id="mvQuery" label="搜索 MV" aria-label="搜索 MV" maxlength="60" variant="outlined" clearable></mdui-text-field>
+      <mdui-button type="submit" variant="filled">搜索</mdui-button>
+    </form>
+    <div id="mvList" class="cm-plgrid cm-mv-grid"></div>`;
+  const form = el.querySelector('#mvSearch'), list = el.querySelector('#mvList');
+  const field = el.querySelector('#mvQuery');
+  let revision = 0;
+  async function load(query, offset, request) {
+    try {
+      const { items, nextOffset } = await kugouRequest('catalog.search', { query, offset, kind: 'mv' });
+      if (!el.isConnected || revision !== request) return;
+      if (!offset) list.innerHTML = '';
+      list.querySelector('#mvMore')?.remove();
+      list.insertAdjacentHTML('beforeend', items.map(item => mvCard({
+        id: item.id, name: item.name, artistName: item.artists, cover: item.artwork,
+        duration: item.durationMs, provider: 'kugou',
+      })).join(''));
+      if (!items.length && !offset) list.innerHTML = '<div class="cm-empty small">暂无 MV</div>';
+      if (nextOffset != null) {
+        list.insertAdjacentHTML('beforeend',
+          '<div class="cm-sq-more" id="mvMore" style="grid-column:1/-1"><mdui-button variant="tonal">加载更多</mdui-button></div>');
+        list.querySelector('#mvMore mdui-button').onclick = async event => {
+          const button = event.currentTarget;
+          button.loading = true;
+          await load(query, nextOffset, request);
+          button.loading = false;
+        };
+      }
+    } catch (error) {
+      if (el.isConnected && revision === request) list.innerHTML = `<div class="cm-empty">${esc(error.message)}</div>`;
+    }
+  }
+  form.onsubmit = event => {
+    event.preventDefault();
+    const query = (field.value || '').trim();
+    if (!query) return;
+    list.innerHTML = skelGrid(6, 'video');
+    void load(query, 0, ++revision);
+  };
+}
+
+
 export async function render(el, params = []) {
-  if (!params || params[0] === 'list') return renderList(el, {});
+  if (!params || params[0] === 'list') return musicPlatform() === 'kugou' ? renderKugouList(el) : renderList(el, {});
+  if (params[0] === 'kugou') return renderKugouDetail(el, params[1]);
   return renderDetail(el, String(params[0]));
 }

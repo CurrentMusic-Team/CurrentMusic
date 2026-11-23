@@ -40,6 +40,13 @@ CREATE TABLE IF NOT EXISTS kugou_plays (
   elapsed_ms INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_kugou_recent ON kugou_plays(user_id, track_id, id DESC);
+CREATE TABLE IF NOT EXISTS kugou_roaming_skips (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  track_id TEXT NOT NULL,
+  UNIQUE (user_id, track_id)
+);
+CREATE INDEX IF NOT EXISTS idx_kugou_roaming_skip_user ON kugou_roaming_skips(user_id, id DESC);
 """
 
 
@@ -216,3 +223,17 @@ def record(uid, ident, play_id, elapsed_ms):
             if not result.rowcount:
                 raise kg.Error(404, "not_found", "播放记录不存在")
     return {"ok": True, "playId": str(play_id)}
+
+
+
+def roaming_exclusions(uid):
+    with _connection() as conn:
+        return {row[0] for row in conn.execute("SELECT track_id FROM kugou_roaming_skips WHERE user_id=?", (uid,))}
+
+
+def roaming_skip(uid, ident):
+    with _connection() as conn, conn:
+        conn.execute("INSERT OR IGNORE INTO kugou_roaming_skips(user_id, track_id) VALUES (?, ?)", (uid, ident))
+        conn.execute("""DELETE FROM kugou_roaming_skips WHERE user_id=? AND id NOT IN
+                       (SELECT id FROM kugou_roaming_skips WHERE user_id=? ORDER BY id DESC LIMIT 500)""", (uid, uid))
+    return {"ok": True}

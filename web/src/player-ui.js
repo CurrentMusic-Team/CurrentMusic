@@ -1748,7 +1748,7 @@ window.addEventListener('cm-likechange', event => {
 
 function syncKugouControls(ov, track) {
   const display = isKugouSong(track) ? 'none' : '';
-  for (const id of ['plAskAi', 'plHeart', 'plCast', 'plCastSlot']) {
+  for (const id of ['plAskAi', 'plCast', 'plCastSlot']) {
     const control = ov.querySelector('#' + id);
     if (control) control.style.display = display;
   }

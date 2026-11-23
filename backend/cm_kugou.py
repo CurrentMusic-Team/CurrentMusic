@@ -37,6 +37,8 @@ _formats = {"vorbis": ("ogg", "audio/ogg"), "opus": ("ogg", "audio/ogg"), "flac"
             "mp3": ("mp3", "audio/mpeg"), "aac": ("m4a", "audio/mp4")}
 _ticket_ttl = 480
 _max_size = 128 * 1024 * 1024
+_max_video_size = 512 * 1024 * 1024
+_video_hosts = {"fsmvpc.kugou.com", "fsmvpc.tx.kugou.com"}
 _device_lock = threading.Lock()
 _public_sessions = {}
 _probe_slots = threading.BoundedSemaphore(3)
@@ -143,10 +145,15 @@ def _duration(value):
     return value if type(value) is int and 0 < value <= 24 * 60 * 60 * 1000 else 0
 
 
-def _track(ident, name, artist, album, artwork, duration):
+def video_hash(value):
+    value = str(value or "").lower()
+    return value if _hash.fullmatch(value) else ""
+
+
+def _track(ident, name, artist, album, artwork, duration, mv=None):
     return {"id": ident, "kind": "song", "name": str(name or "")[:300],
             "artists": str(artist or "")[:300], "album": str(album or "")[:300],
-            "artwork": _image(artwork), "durationMs": _duration(duration), "videoId": ""}
+            "artwork": _image(artwork), "durationMs": _duration(duration), "videoId": video_hash(mv)}
 
 
 def search(query, offset, limit):
@@ -175,7 +182,7 @@ def search(query, offset, limit):
         if _record.fullmatch(ident):
             duration = row.get("Duration")
             items.append(_track(ident, row.get("SongName"), row.get("SingerName"), row.get("AlbumName"),
-                                row.get("Image"), duration * 1000 if type(duration) is int else 0))
+                                row.get("Image"), duration * 1000 if type(duration) is int else 0, row.get("MvHash")))
     return {"items": items, "nextOffset": offset + len(rows) if rows and has_more else None}
 
 
@@ -238,8 +245,8 @@ def qualities(ident):
     return {"levels": [level for level in _levels if variants[level]]}
 
 
-def _cdn_url(value):
-    allowed = {host.strip() for host in os.environ.get("CM_KUGOU_CDN_HOSTS", _cdn_default).split(",")}
+def _cdn_url(value, *, video=False):
+    allowed = _video_hosts if video else {host.strip() for host in os.environ.get("CM_KUGOU_CDN_HOSTS", _cdn_default).split(",")}
     try:
         url = urlsplit(value)
         return (url.scheme in ("http", "https") and url.hostname in allowed and url.hostname.endswith(".kugou.com")
@@ -255,13 +262,14 @@ class Ticket:
     mime: str
     expires: float
     budget: int = 0
+    video: bool = False
 
 
 _tickets = {}
 _ticket_lock = threading.Lock()
 
 
-def _issue(url, uid, mime="", ttl=_ticket_ttl):
+def _issue(url, uid, mime="", ttl=_ticket_ttl, *, video=False):
     token = secrets.token_urlsafe(24)
     now = time.monotonic()
     with _ticket_lock:
@@ -269,7 +277,7 @@ def _issue(url, uid, mime="", ttl=_ticket_ttl):
             del _tickets[key]
         if len(_tickets) >= 2048:
             raise Error(503, "kugou_busy", "酷狗播放暂时繁忙")
-        _tickets[token] = Ticket(url, uid, mime, now + ttl, 2 * 1024 * 1024 if not uid else 0)
+        _tickets[token] = Ticket(url, uid, mime, now + ttl, 2 * 1024 * 1024 if not uid else 0, video)
     return token
 
 
@@ -302,12 +310,16 @@ def _probe(url):
         _probe_slots.release()
 
 
-def resolve(ident, quality, uid, origin):
-    if quality not in ("auto", *_levels):
-        raise Error(400, "invalid_input", "不支持的酷狗音质")
+def _https_origin(origin):
     url = urlsplit(origin)
     if url.scheme != "https" or not url.hostname or (url.username or url.password or url.path or url.query or url.fragment):
         raise Error(503, "kugou_https_required", "酷狗播放需要 HTTPS 服务地址")
+
+
+def resolve(ident, quality, uid, origin):
+    if quality not in ("auto", *_levels):
+        raise Error(400, "invalid_input", "不支持的酷狗音质")
+    _https_origin(origin)
     cookie = server_cookie()
     resource, metadata, audio = track(ident)
     if not resource["durationMs"]:
@@ -346,6 +358,42 @@ def resolve(ident, quality, uid, origin):
     raise Error(403, "playback_unavailable", "酷狗未返回可验证的完整音频")
 
 
+def resolve_video(ident, uid, origin):
+    if not _hash.fullmatch(ident):
+        raise Error(400, "invalid_input", "酷狗 MV ID 格式错误")
+    _https_origin(origin)
+    reply = _api("/video/url", {"hash": ident}, cookie=_catalog_cookie())
+    data, privileges = reply.get("data") or {}, reply.get("privileges") or {}
+    source = data.get(ident) or {}
+    # The tracker reports a separate video privilege. Only the explicit free/full value is accepted here.
+    if reply.get("status") != 1 or type(privileges.get(ident)) is not int or privileges[ident] != 0:
+        raise Error(403, "playback_unavailable", "当前酷狗 MV 不可播放")
+    urls = [source.get("downurl"), *(source.get("backupdownurl") or [])]
+    for url in dict.fromkeys(url for url in urls if isinstance(url, str) and _cdn_url(url, video=True)):
+        if _verify_video(url):
+            token = _issue(url, uid, "video/mp4", video=True)
+            return {"url": origin + "/cm/kugou/media/" + token, "format": "mp4", "expiresIn": _ticket_ttl}
+    raise Error(403, "playback_unavailable", "酷狗未返回可验证的 MV")
+
+
+def _verify_video(url):
+    request = Request(url, headers={"Range": "bytes=0-15"})
+    try:
+        with _opener.open(request, timeout=5) as response:
+            size = _media_size(response.headers.get("Content-Range", ""))
+            return (response.status == 206 and 16 <= size <= _max_video_size
+                    and response.headers.get("Content-Range", "").startswith("bytes 0-15/")
+                    and response.read(16)[4:8] == b"ftyp")
+    except (OSError, ValueError):
+        return False
+
+
+def _media_size(content_range):
+    if _content_range.fullmatch(content_range):
+        return int(content_range.rsplit("/", 1)[1])
+    return 0
+
+
 def stream(handler, token, authorized):
     with _ticket_lock:
         ticket = _tickets.get(token)
@@ -357,8 +405,8 @@ def stream(handler, token, authorized):
     elif (handler.client_address[0] != "127.0.0.1" or
           handler.headers.get("Host") != f"127.0.0.1:{os.environ.get('CM_PORT', '3010')}"):
         raise Error(404, "not_found", "播放地址不可用")
-    if not _cdn_url(ticket.url):
-        raise Error(502, "kugou_upstream_error", "酷狗音频地址不可用")
+    if not _cdn_url(ticket.url, video=ticket.video):
+        raise Error(502, "kugou_upstream_error", "酷狗媒体地址不可用")
     byte_range = handler.headers.get("Range", "")
     if byte_range and not _range.fullmatch(byte_range):
         raise Error(416, "invalid_range", "仅支持单段字节范围")
@@ -374,9 +422,10 @@ def stream(handler, token, authorized):
             status = response.status
             length = response.headers.get("Content-Length", "")
             content_range = response.headers.get("Content-Range", "")
+            max_size = _max_video_size if ticket.video else _max_size
             if (status not in (200, 206, 416) or not re.fullmatch(r"[0-9]{1,12}", length)
-                    or int(length) > _max_size or (status in (206, 416) and not _content_range.fullmatch(content_range))):
-                raise Error(502, "kugou_upstream_error", "酷狗音频暂不可用")
+                    or int(length) > max_size or (status in (206, 416) and not 0 < _media_size(content_range) <= max_size)):
+                raise Error(502, "kugou_upstream_error", "酷狗媒体暂不可用")
             handler.send_response(status)
             handler.send_header("Content-Type", ticket.mime or "application/octet-stream")
             handler.send_header("Content-Length", length if status != 416 else "0")

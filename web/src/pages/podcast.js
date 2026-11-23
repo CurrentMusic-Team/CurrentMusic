@@ -7,26 +7,32 @@
 //      /broadcast/channel/collect/list（T1）、/broadcast/sub（T2）
 // 私人 FM 与场景：/personal_fm、/personal/fm/mode、/fm_trash（T2）、
 //      /aidj/content/rcmd、/playmode/intelligence/list、/radio/sport/get
+import { kugouRequest } from '../kugou.js';
+import { kugouWrite } from '../kugou-library.js';
+import { kugouSongs, musicPlatform } from '../music-platform.js';
 import { api, auth, ncmSongs } from '../api.js';
 import { esc, toast, fmtCount, skelGrid, confirmDialog, promptDialog } from '../ui.js';
 import { player } from '../player.js';
 
 const KEY = 'cm.podTab';
 
-function needBind(el, text = '播客与私人 FM 跟你的网易云账号绑定，请先绑定') {
+function needBind(el, text = '播客与私人 FM 跟你的网易云账号绑定，请先绑定', action = '去绑定网易云') {
   el.innerHTML = `<div class="cm-login-tip page">
     <span class="material-icons-outlined" style="font-size:calc(44px * var(--cm-fs, 1))">podcasts</span>
     <div>${esc(text)}</div>
-    <mdui-button variant="filled" href="#/user">去绑定网易云</mdui-button></div>`;
+    <mdui-button variant="filled" href="#/user">${esc(action)}</mdui-button></div>`;
 }
 
 export async function render(el, params = {}) {
-  if (!auth.token) { needBind(el, '登录后可查看播客与私人 FM'); return; }
-  let bind = { bound: false };
-  try { bind = await api.bindStatus(); } catch { /* 未绑定 */ }
-  if (!bind.bound) { needBind(el); return; }
+  const kugou = musicPlatform() === 'kugou';
+  if (!auth.token) { needBind(el, '登录后可查看私人 FM', '去登录'); return; }
+  if (!kugou) {
+    let bind = { bound: false };
+    try { bind = await api.bindStatus(); } catch { /* 未绑定 */ }
+    if (!bind.bound) { needBind(el); return; }
+  }
 
-  const tab = params.tab || sessionStorage.getItem(KEY) || 'fm';
+  const tab = kugou ? 'fm' : params.tab || sessionStorage.getItem(KEY) || 'fm';
   const TABS = [
     { k: 'fm', l: '私人 FM' },
     { k: 'podcast', l: '我的播客' },
@@ -35,7 +41,7 @@ export async function render(el, params = {}) {
   ];
   el.innerHTML = `
     <div class="cm-sqtabs" id="podTabs">
-      ${TABS.map(t => `<button class="cm-sqtab${t.k === tab ? ' on' : ''}" data-k="${t.k}">${t.l}</button>`).join('')}
+      ${(kugou ? TABS.slice(0, 1) : TABS).map(t => `<button class="cm-sqtab${t.k === tab ? ' on' : ''}" data-k="${t.k}">${t.l}</button>`).join('')}
     </div>
     <div id="podBody">${skelGrid(4)}</div>`;
   el.querySelectorAll('#podTabs .cm-sqtab').forEach(b => {
@@ -67,14 +73,27 @@ export async function render(el, params = {}) {
       ],
     };
     let catalog = fallback;
-    try { catalog = await api.roamingCatalog(); } catch { /* 使用内置目录兜底 */ }
+    if (kugou) {
+      const options = await kugouRequest('roaming.stations', {}).catch(() => null);
+      const stations = options?.items || [];
+      const isScene = station => station.category === '场景';
+      const asChoice = station => ({ code: station.id, title: station.name, subtitle: station.category });
+      catalog = {
+        modes: [{ code: 'DEFAULT', title: '默认模式', subtitle: '按最近播放推荐' },
+          ...stations.filter(station => !isScene(station)).slice(0, 4).map(asChoice)],
+        scenes: stations.filter(isScene).slice(0, 12).map(asChoice),
+      };
+    } else {
+      try { catalog = await api.roamingCatalog(); } catch { /* 使用内置目录兜底 */ }
+    }
     const modes = (catalog.modes && catalog.modes.length ? catalog.modes : fallback.modes)
       .map(x => ({ ...x, key: `mode:${x.code}`, scene: false }));
-    const scenes = (catalog.scenes && catalog.scenes.length ? catalog.scenes : fallback.scenes)
+    const scenes = ((kugou || catalog.scenes?.length) ? catalog.scenes : fallback.scenes)
       .map(x => ({ ...x, key: `scene:${x.code}`, scene: true }));
     const choices = modes.concat(scenes);
-    let choice = choices.find(x => x.key === sessionStorage.getItem('cm.roamChoice')) || choices[0];
-    let songs = [], seen = new Set(), loading = false;
+    const choiceKey = kugou ? 'cm.roamChoice.kugou' : 'cm.roamChoice';
+    let choice = choices.find(x => x.key === sessionStorage.getItem(choiceKey)) || choices[0];
+    let songs = [], seen = new Set(), loading = false, nextOffset = 0;
 
     body.innerHTML = `
       <section class="cm-sec">
@@ -109,17 +128,18 @@ export async function render(el, params = {}) {
         <div class="cm-lm-item" data-i="${i}">
           <div class="cm-lm-lyric">${esc(s.name)}</div>
           <div class="cm-lm-meta"><span>${esc(s.artists || '')}${s.album ? ' · ' + esc(s.album) : ''}</span>
-            <span><i class="cm-si-act" data-trash="${s.ncm_id}">不喜欢</i></span></div>
+            <span><i class="cm-si-act" data-trash="${esc(s.ncm_id)}">不喜欢</i></span></div>
         </div>`).join('');
       list.querySelectorAll('[data-i]').forEach(el => {
         el.onclick = ev => { if (!ev.target.closest('[data-trash]')) player.playList(songs, +el.dataset.i); };
       });
       list.querySelectorAll('[data-trash]').forEach(el => {
         el.onclick = () => confirmDialog({
-          title: '不喜欢这首歌？', body: '会从网易云私人漫游推荐中移除。',
+          title: '不喜欢这首歌？', body: '会从私人漫游推荐中移除。',
           onOk: async () => {
             try {
-              await api.roamingTrash(el.dataset.trash);
+              if (kugou) await kugouWrite('roaming.skip', { id: el.dataset.trash.slice(3) });
+              else await api.roamingTrash(el.dataset.trash);
               songs = songs.filter(x => String(x.ncm_id) !== String(el.dataset.trash));
               paintSongs();
               toast('已从漫游推荐中移除');
@@ -133,18 +153,29 @@ export async function render(el, params = {}) {
       loading = true;
       hint.textContent = '正在获取推荐…';
       try {
-        const d = await api.roamingSongs(choice.scene ? 'SCENE_RCMD' : choice.code,
-          choice.scene ? choice.code : '', 20, reset ? [] : [...seen]);
-        const fresh = d.songs || [];
+        let fresh;
+        if (kugou) {
+          if (!reset && nextOffset == null) { hint.textContent = '暂时没有新的推荐，可切换模式'; return; }
+          const reply = await kugouRequest('roaming.songs', {
+            station: choice.code === 'DEFAULT' ? '' : choice.code, limit: 20,
+            offset: reset ? 0 : nextOffset, excludeIds: reset ? [] : [...seen].slice(-100).map(id => id.slice(3)),
+          });
+          nextOffset = reply.nextOffset;
+          fresh = kugouSongs(reply.items).filter(song => reset || !seen.has(song.ncm_id));
+        } else {
+          const d = await api.roamingSongs(choice.scene ? 'SCENE_RCMD' : choice.code,
+            choice.scene ? choice.code : '', 20, reset ? [] : [...seen]);
+          fresh = d.songs || [];
+        }
         if (reset) { songs = fresh; seen = new Set(songs.map(x => x.ncm_id)); }
         else { songs = songs.concat(fresh); fresh.forEach(x => seen.add(x.ncm_id)); }
-        sessionStorage.setItem('cm.roamChoice', choice.key);
+        sessionStorage.setItem(choiceKey, choice.key);
         paint();
         paintSongs();
         hint.textContent = fresh.length ? `已加载 ${fresh.length} 首` : '暂时没有新的推荐，可换一批或切换模式';
       } catch (e) {
         if (reset) { songs = []; paintSongs(); }
-        hint.textContent = /绑定|401/.test(e.message || '') ? '请先绑定网易云账号' : `获取推荐失败：${e.message}`;
+        hint.textContent = !kugou && /绑定|401/.test(e.message || '') ? '请先绑定网易云账号' : `获取推荐失败：${e.message}`;
       } finally { loading = false; }
     };
 

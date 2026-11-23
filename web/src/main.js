@@ -123,6 +123,7 @@ const ROUTES = [
   { re: /^#\/assets$/, page: assetsPage, title: '我的音乐资产' },
   { re: /^#\/album\/(\d+)$/, page: albumPage, title: '专辑', fixed: m => [m[1]] },
   { re: /^#\/mv\/(\d+)$/, page: mvPage, title: 'MV', fixed: m => [m[1]] },
+  { re: /^#\/kugou\/mv\/([a-f0-9]{32})$/, page: mvPage, title: 'MV', fixed: m => ['kugou', m[1]] },
   { re: /^#\/mvlist$/, page: mvPage, title: 'MV', fixed: ['list'] },
   { re: /^#\/albums$/, page: albumsPage, title: '新碟' },
   { re: /^#\/ugc$/, page: ugcPage, title: '百科贡献' },
