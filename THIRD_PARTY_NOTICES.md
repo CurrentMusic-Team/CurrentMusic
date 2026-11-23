@@ -31,6 +31,13 @@ that license does not replace LDDC's license.
 The headless compatibility shim under `tools/lddc_headless/` contains no LDDC code;
 it only provides a few empty `PySide6.QtCore` types so LDDC's non-GUI modules can
 be imported without installing the Qt GUI stack.
+
+## KuGouMusicApi (optional, separate installation)
+
+- MakcRe/KuGouMusicApi (MIT), https://github.com/MakcRe/KuGouMusicApi.
+  The CurrentMusic KuGou adapter calls a separately installed loopback service.
+  That installation supplies its own license and dependencies.
+
 ## API documentation site
 
 - Docusaurus 3.10.2 / Classic theme (MIT), https://github.com/facebook/docusaurus.

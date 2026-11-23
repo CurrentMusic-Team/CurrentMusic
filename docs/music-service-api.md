@@ -50,6 +50,14 @@ curl 'https://music.20110208.xyz/cm/music-service/v1/catalog.search' \
 
 流声引擎的网易云适配覆盖上表。QQ 音乐首期提供公开搜索、歌曲、专辑、歌手与公开歌单，歌词由该实例的能力开关决定。个人歌单、收藏、漫游和播放需要服务声明对应能力。
 
+## 酷狗音乐
+
+`provider: "kugou"` 支持 `catalog.search`（`kind: "song"`）、`catalog.track`、`playback.qualities` 和 `playback.resolve`。把搜索结果原样作为详情及播放的 `id`。它由酷狗歌曲哈希和专辑音频 ID 组成。
+
+外接播放使用 `music.play` 授权，并检查站内 `access.playback`。Web 在搜索页面进入「搜索酷狗音乐」，通过 `POST /cm/kugou/v1/{operation}` 调用同一套操作，JSON 请求体为 `input` 对象本身，播放携带 CurrentMusic 登录会话 Bearer。`GET /cm/kugou/capabilities` 返回公开的 `catalog` 和 `playback` 开关状态。
+
+酷狗音质使用 `standard`、`exhigh`、`lossless`。`auto` 从无损开始，按可用档位降档；指定档位不可用时返回 `playback_unavailable`。取址返回实际音频格式、码率（bps）和 HTTPS 媒体地址。媒体地址支持普通 `GET`、`HEAD` 与单段 `Range`，到期后通过 `playback.resolve` 刷新。上游拒绝、试听或媒体无法验证时不会签发地址。
+
 [机器可读能力目录](/api-docs/music-service-capabilities.json)列出了每项的支持平台、权限及部署开关。[OpenAPI](/api-docs/music-service.openapi.json)描述传输接口。
 
 ## 用户授权
@@ -62,4 +70,6 @@ curl 'https://music.20110208.xyz/cm/music-service/v1/catalog.search' \
 
 使用服务账号运行 `python3 tools/register-music-service-client.py` 可登记 X 的公开客户端。自建实例可设 `CM_MUSIC_SERVICE_CLIENT_ID` 选择另一条已登记的公开客户端。描述会据可用注册和媒体权限列出能力。
 
-由运营方确认对应来源和用途后，通过 `CM_MUSIC_SERVICE_MEDIA` 按需启用 `lyrics,playback,mv,download,cloud`。音频、MV 和下载使用用户自己的有效绑定，保留账号、地区、试听限制及平台拒绝。下载有独立权限和接口。现有 Web 和落雪协议各自沿用原入口。
+网易云媒体能力通过 `CM_MUSIC_SERVICE_MEDIA` 按需启用 `lyrics,playback,mv,download,cloud`，使用用户自己的有效绑定。下载有独立权限和接口。
+
+酷狗使用独立开关 `CM_KUGOU_PLAYBACK`。运营方将概念版会话写入 `CM_KUGOU_COOKIE_FILE` 指定的受保护文件，获授权的用户共用这份服务端会话。客户端只负责站内授权。酷狗仍按其上游的账号、地区及曲目播放权限决定是否返回完整音频。

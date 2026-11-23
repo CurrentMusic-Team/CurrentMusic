@@ -55,6 +55,7 @@ import { applyTheme } from './pages/settings.js';
 import * as home from './pages/home.js';
 import * as levels from './pages/levels.js';
 import * as search from './pages/search.js';
+import * as kugouMusic from './pages/kugou.js';
 import * as library from './pages/library.js';
 import * as playlist from './pages/playlist.js';
 import * as plazaPage from './pages/plaza.js';
@@ -107,6 +108,7 @@ const ROUTES = [
   { re: /^#\/levels$/, page: levels, title: '积分与升级规则' },
   { re: /^#\/levels\/trial$/, page: levels, title: '通过试炼', fixed: ['trial'] },
   { re: /^#\/search$/, page: search, title: '搜索' },
+  { re: /^#\/kugou(?:\/([a-f0-9]{32}-[1-9][0-9]{0,14}))?$/, page: kugouMusic, title: '酷狗音乐' },
   { re: /^#\/square$/, page: squarePage, title: '发现' },
   { re: /^#\/u\/(\d+)$/, page: profilePage, title: '用户主页', fixed: m => [m[1]] },
   { re: /^#\/artist\/(\d+)$/, page: artistPage, title: '歌手', fixed: m => [m[1]] },

@@ -3,6 +3,7 @@ import { network, probeLines, swapLine, lineBest, famOf, sourceIdentity } from '
 import { mdui } from './md.js';
 import { api, auth, settings, ncmSongs } from './api.js';
 import { toast, tierLabel } from './ui.js';
+import { isKugouSong, kugouQuality } from './kugou.js';
 import { resolveSongUrl } from './songurl.js';   // 三级音源回退（P2）
 import { buildEqChain, removeEqChain } from './eq.js';   // 均衡器链（挂进音频图）
 import { updateBrowserMediaSession, updateBrowserMediaState } from './media-session.js';
@@ -464,7 +465,7 @@ export const player = {
   async _prefetchNext() {
     if (!this.queue.length || this._prefetchBusy) return;
     const nx = this.queue[this.index + 1] || this.queue[0];
-    if (!nx || !nx.ncm_id) return;
+    if (!nx || !nx.ncm_id || isKugouSong(nx)) return;
     if (this._prefetch && String(this._prefetch.id) === String(nx.ncm_id)) return;
     try {
       const c = navigator.connection || navigator.mozConnection || {};
@@ -572,7 +573,7 @@ export const player = {
 
   /** 心动模式：以 seed（默认当前曲目）为种子续一批到队尾，返回新增条数。 */
   async heartExtend(seed) {
-    if (this._heartBusy) return 0;
+    if (this._heartBusy || isKugouSong(seed || this.meta)) return 0;
     const id = ((seed || this.meta) || {}).ncm_id;
     if (!id) return 0;
     this._heartBusy = true;
@@ -594,7 +595,7 @@ export const player = {
 
   /** 队列快见底就提前续（异步补齐，不阻塞切歌）。 */
   _heartEnsure() {
-    if (!this.heartMode || this._heartBusy) return;
+    if (!this.heartMode || this._heartBusy || isKugouSong(this.meta)) return;
     if (this._heartMiss >= 3) return;                 // 连续失败：停手，不给上游刷请求
     if (this.queue.length - this.index > 3) return;   // 还够听
     this.heartExtend(this.meta);
@@ -670,11 +671,11 @@ export const player = {
         this._discardPrefetch();
         this._prefetch = null;
       } else {
-        const _pl2 = effectiveLevel();
+        const _pl2 = isKugouSong(meta) ? { level: kugouQuality() } : effectiveLevel();
         try {
           info = await resolveSongUrl(meta, _pl2.level, _pl2.immerse, skipDolby ? { supportsDolby: false } : undefined);
         } catch (e) {
-          if (_pl2.level !== settings.quality) {
+          if (!isKugouSong(meta) && _pl2.level !== settings.quality) {
             toast('该音效当前不可用，已回退普通音质');
             info = await resolveSongUrl(meta, settings.quality);
           } else throw e;
@@ -761,7 +762,7 @@ export const player = {
   },
 
   report() {
-    if (!auth.token || !this.meta) return;
+    if (!auth.token || !this.meta || isKugouSong(this.meta)) return;
     lastTickT = -1;
     lastCastAt = 0;
     lastFlushAt = 0;
@@ -884,7 +885,7 @@ export const player = {
 
   async changeQuality(level) {
     if (this.playPending) { toast('歌曲正在准备，请稍后切换音质'); return; }
-    settings.quality = level;
+    if (!isKugouSong(this.meta)) settings.quality = level;
     if (!this.meta) return;
     const request = this._playRequest;
     const at = audio.currentTime;
@@ -892,6 +893,7 @@ export const player = {
     try {
       const info = await resolveSongUrl(this.meta, level);
       if (this._playRequest !== request) return;
+      if (isKugouSong(this.meta)) kugouQuality(level);
       const betterQ = swapLine(info);        // 换档也落在锁定的最优线上
       if (betterQ) info.url = betterQ;
       this.urlInfo = info;
@@ -906,7 +908,7 @@ export const player = {
         });
       }
       emit('song');
-      toast(`音质：${tierLabel(info.level)}`);
+      toast(`音质：${isKugouSong(this.meta) ? info.type.toUpperCase() + (info.br ? ` · ${Math.round(info.br / 1000)} kbps` : '') : tierLabel(info.level)}`);
     } catch (e) { toast(e.message); }
   },
 
@@ -1088,7 +1090,7 @@ async function recoverStalled() {
   }
   try {
     const at = audio.currentTime || 0;
-    const _pl3 = playLevel();
+    const _pl3 = isKugouSong(player.meta) ? { level: kugouQuality() } : playLevel();
     // refresh:1 = 让服务端**换一条 CDN 线**（毫秒级；旧行为是返回缓存里同一条坏地址，
     // 于是每 6 秒重试一次同一条线，用户看到的就是"一直卡"）。档位保持用户所选不变。
     // refresh 重拿地址：已锁定线路时带 host 在**同一条最优线**上重连（新签名/新连接，

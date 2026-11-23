@@ -6,6 +6,7 @@
 //   4) /check/music           —— 都失败时判断「是版权不可播还是网络问题」，给出准确文案
 import { network, sourceIdentity } from './network.js';
 import { api } from './api.js';
+import { isKugouSong, resolveKugouSong } from './kugou.js';
 
 // EC-3 解码能力由当前浏览器报告。实际输出由系统和音频设备决定。
 function supportsDolby() {
@@ -36,6 +37,7 @@ function pickUrl(d) {
  * @returns {Promise<{url:string,type:string,level:string,host?:string,hosts?:string[]}>}
  */
 export async function resolveSongUrl(meta, level, immerse, opts) {
+  if (isKugouSong(meta)) return resolveKugouSong(meta, level);
   const identity = sourceIdentity();
   let info;
   try { info = await resolveProviderUrl(meta, level, immerse, opts); }

@@ -83,6 +83,20 @@ server {
         proxy_read_timeout 120s;
     }
 
+    # KuGou HTTPS playback. Range requests go directly to the backend.
+    location ^~ /cm/kugou/media/ {
+        access_log off;
+        error_log /dev/null crit;
+        proxy_cache off;
+        proxy_buffering off;
+        proxy_pass http://127.0.0.1:3010/kugou/media/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 90s;
+    }
+
     # Chat SSE (exact match wins over /cm/)
     location = /cm/live/chat {
         gzip off;

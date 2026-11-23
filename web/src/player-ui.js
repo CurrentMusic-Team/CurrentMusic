@@ -1,3 +1,4 @@
+import { isKugouSong, kugouQuality, kugouRequest, KUGOU_QUALITIES } from './kugou.js';
 // 播放器 UI：底部迷你条 + 全屏播放页（封面/歌词/进度/音质/点赞/收藏/加入歌单）。
 import { mdui } from './md.js';
 import { createWaveform, WAVE_STYLE } from './waveform.js';
@@ -298,7 +299,7 @@ async function loadLyric() {
   pushDesktopLyric(-1, true);
   let data;
   try {
-    data = await api.lyric(id, autoLyrics);
+    data = isKugouSong(player.meta) ? { lines: [] } : await api.lyric(id, autoLyrics);
     if (!Array.isArray(data?.lines)) throw new Error('歌词格式无效');
   } catch {
     request.failed = true;
@@ -1306,6 +1307,7 @@ async function openFull() {
     window.__cmWave = waveCtl;          // 调试/测试入口（只读引用）
   }
   ov.querySelector('#plQuality').onclick = qualityMenu;
+  syncKugouControls(ov, player.meta);
   ov.querySelector('#plMore').onclick = openMoreDrawer;
   const castBtn = ov.querySelector('#plCast');
   const castSlot = ov.querySelector('#plCastSlot');
@@ -1349,6 +1351,7 @@ async function loadStats() {
   if (!m) return;
   const el = document.getElementById('plStats');
   if (!el) return;
+  if (isKugouSong(m)) { if (el) el.innerHTML = ''; return; }
   let pop = m.pop || 0, comments = null, count = getStatus(m.ncm_id).count;
   try {
     const d = await api.songDetail([m.ncm_id]);
@@ -1548,6 +1551,10 @@ function openMoreDrawer() {
     actions: [{ text: '关闭' }],
   });
   diag.classList.add('cm-more-dialog');
+  if (isKugouSong(m)) {
+    for (const id of ['#mShare', '#mWiki', '.cm-more-dl']) diag.querySelector(id)?.remove();
+    diag.querySelector('#mSongInfo')?.closest('section')?.remove();
+  }
   setTimeout(() => {
     const msh = diag.querySelector('#mShare');
     if (msh) msh.onclick = () => {
@@ -1697,6 +1704,7 @@ function bindArtistLinks(scope) {
 /** 按「默认红心目标」同步播放页红心、网易云小圆点与红心数。 */
 let playerLikeRevision = 0;
 async function syncPlayerLike(m, refresh = true) {
+  if (isKugouSong(m)) return;
   if (!m) return;
   const revision = ++playerLikeRevision;
   try {
@@ -1738,10 +1746,19 @@ window.addEventListener('cm-likechange', event => {
   if (!event.detail?.id || Number(player.meta?.ncm_id) === event.detail.id) syncPlayerLike(player.meta, false);
 });
 
+function syncKugouControls(ov, track) {
+  const display = isKugouSong(track) ? 'none' : '';
+  for (const id of ['plAdd', 'plLike', 'plStar', 'plAskAi', 'plHeart', 'plCast', 'plCastSlot', 'plComments']) {
+    const control = ov.querySelector('#' + id);
+    if (control) control.style.display = display;
+  }
+}
+
 function updateSongInfo() {
   const ov = overlay();
   const m = player.meta;
   if (!ov || ov.hidden || !m) return;
+  syncKugouControls(ov, m);
   const cover = document.getElementById('plCover');
   if (cover) cover.src = m.pic || '';
   const glow = ov.querySelector('.lp-artwork__glow img, .sb-artwork-glow img');
@@ -1763,7 +1780,9 @@ function updateSongInfo() {
 function paintQuality() {
   const q = document.getElementById('plQuality');
   if (!q) return;
-  const txt = player.urlInfo ? tierLabel(player.urlInfo.level) : tierLabel(settings.quality);
+  const info = player.urlInfo;
+  const metric = isKugouSong(player.meta) && info?.type ? info.type.toUpperCase() + (info.br ? ` · ${Math.round(info.br / 1000)} kbps` : '') : '';
+  const txt = player.urlInfo ? metric || tierLabel(player.urlInfo.level) : tierLabel(settings.quality);
   const label = q.querySelector('.lp-quality__label');
   if (label) label.textContent = txt; else q.textContent = txt;
 }
@@ -1788,9 +1807,19 @@ on('state', () => {
   renderMini();
 });
 
-function qualityMenu() {
-  const cur = settings.quality;
-  const items = QUALITY_TIERS.map(t =>
+async function qualityMenu() {
+  const kugou = isKugouSong(player.meta);
+  const cur = kugou ? kugouQuality() : settings.quality;
+  let tiers = QUALITY_TIERS;
+  if (kugou) {
+    const track = player.meta;
+    try {
+      const available = await kugouRequest('playback.qualities', { id: track.kugou_id });
+      if (player.meta !== track) return;
+      tiers = KUGOU_QUALITIES.filter(item => item.key === 'auto' || available.levels?.includes(item.key));
+    } catch (error) { if (player.meta === track) toast(error.message); return; }
+  }
+  const items = tiers.map(t =>
     `<div class="cm-qm-item" data-v="${t.key}">${t.label}${t.spec ? `<em class="cm-qm-spec">${t.spec}</em>` : ''}${t.key === cur ? '<span class="material-icons-outlined">check</span>' : ''}</div>`).join('');
   const diag = mdui.dialog({
     headline: '选择音质',
@@ -1847,7 +1876,7 @@ export function openQueue() {
 // 说明：此处原先是一份 200 行的「只在歌曲维度可用」的实现，已抽到 comments.js，
 // 以免同一套热门/最新/楼层/点赞/回复逻辑在多处分叉。
 export async function openComments(meta) {
-  if (!meta) return;
+  if (!meta || isKugouSong(meta)) return;
   const { openComments: openEntityComments } = await import('./comments.js');
   return openEntityComments({ type: 0, id: meta.ncm_id, title: meta.name || '歌曲' });
 }
