@@ -30,6 +30,7 @@ GROUPS = {
     'roaming': '私人漫游', 'share': '分享', 'plays': '播放历史', 'decorations': '头像挂件',
     'download': '客户端与资源', 'x': '客户端与资源', 'cast': '客户端与资源', 'badges': '客户端与资源',
     'lx': '客户端与资源', 'audio-sources': '客户端与资源', 'music-service': '外接音乐服务',
+    'kugou': '酷狗概念版',
 }
 GUIDES = {
     'community-api': '个人主页、横幅与帖子',

@@ -1,6 +1,7 @@
 // 通用网易云评论抽屉。排序与楼层分页使用服务端统一响应。
-import { api } from './api.js';
-import { kugouRequest } from './kugou.js';
+import { api, auth } from './api.js';
+import { kugouAccountRequest, kugouRequest } from './kugou.js';
+import { kugouWrite } from './kugou-library.js';
 import { esc, fmtCount, toast, skelComments } from './ui.js';
 import { renderEmoticons, fmtCmtTime } from './commentutil.js';
 
@@ -10,6 +11,7 @@ let dismissComments;
 
 export async function openComments({ type = 0, id, title = '', provider = 'netease' } = {}) {
   const kugou = provider === 'kugou';
+  const platform = kugou ? '酷狗' : '网易云';
   if (!Object.values(COMMENT_TYPE).includes(type) || !id) return toast('缺少评论对象');
   dismissComments?.(true);
   const ov = document.createElement('div');
@@ -33,8 +35,9 @@ export async function openComments({ type = 0, id, title = '', provider = 'netea
       </div>
       <div class="cmt-composer"${kugou ? ' hidden' : ''}>
         <div id="cmtReplyBar" hidden><span></span><button type="button" class="cmt-action" id="cmtReplyCancel" aria-label="取消回复"><span class="material-icons-outlined" aria-hidden="true">close</span></button></div>
-        <input id="cmtInput" type="text" maxlength="140" aria-label="网易云评论内容" placeholder="绑定网易云账号后可发评" disabled>
+        <input id="cmtInput" type="text" maxlength="140" aria-label="${platform}评论内容" placeholder="绑定${platform}账号后可发评" disabled>
         <mdui-button variant="filled" id="cmtSend" disabled>发送</mdui-button>
+        ${kugou ? '<mdui-button variant="tonal" id="cmtBind" hidden>绑定酷狗</mdui-button>' : ''}
       </div>
     </div>`;
   document.body.appendChild(ov);
@@ -69,6 +72,7 @@ export async function openComments({ type = 0, id, title = '', provider = 'netea
 
   const input = ov.querySelector('#cmtInput');
   const sendButton = ov.querySelector('#cmtSend');
+  const connect = ov.querySelector('#cmtBind');
   const replyBar = ov.querySelector('#cmtReplyBar');
   const list = ov.querySelector('#cmtList');
   const items = list.querySelector('.cmt-items');
@@ -87,7 +91,7 @@ export async function openComments({ type = 0, id, title = '', provider = 'netea
     replyBar.hidden = !target;
     replyBar.firstElementChild.textContent = target ? `回复 @${target.nickname}` : '';
     input.placeholder = target ? `回复 @${target.nickname}…` : meUid
-      ? '以网易云账号发表评论…' : '绑定网易云账号后可发评';
+      ? `以${platform}账号发表评论…` : `绑定${platform}账号后可发评`;
   }
 
   function updateComposer(uid) {
@@ -98,6 +102,16 @@ export async function openComments({ type = 0, id, title = '', provider = 'netea
     sendButton.disabled = !meUid;
     if (!meUid) setReply(null);
     else setReply(replyTo);
+  }
+
+  async function loadKugouComposer() {
+    const state = auth.token ? await kugouAccountRequest().catch(() => null) : { enabled: true, bound: false };
+    if (!active() || !state?.enabled) return;
+    ov.querySelector('.cmt-composer').hidden = false;
+    connect.hidden = !!state.bound;
+    connect.textContent = auth.token ? '绑定酷狗' : '去登录';
+    sendButton.hidden = !state.bound;
+    updateComposer(state.bound ? 'kugou-account' : '');
   }
 
   function requireBinding() {
@@ -181,7 +195,7 @@ export async function openComments({ type = 0, id, title = '', provider = 'netea
         ...(state.cursor ? { cursor: state.cursor } : {}) });
       await entered;
       if (!active() || current !== state) return;
-      updateComposer(data.meUid);
+      if (!kugou) updateComposer(data.meUid);
       if (state.page === 1) items.innerHTML = '';
       appendRows(items, data.comments, state.seen);
       total.textContent = data.total ? `${fmtCount(data.total)} 条评论` : '';
@@ -228,7 +242,7 @@ export async function openComments({ type = 0, id, title = '', provider = 'netea
       const data = await api.commentReplies({ ...resource, commentId: floor.dataset.parent,
         ...(state.cursor ? { cursor: state.cursor } : {}) });
       if (!isCurrent()) return;
-      updateComposer(data.meUid);
+      if (!kugou) updateComposer(data.meUid);
       appendRows(floor.querySelector('.cmt-floor-items'), data.comments, state.seen, true);
       state.cursor = data.nextCursor;
       state.more = data.more;
@@ -309,8 +323,12 @@ export async function openComments({ type = 0, id, title = '', provider = 'netea
     sending = true;
     sendButton.loading = true;
     try {
-      await api.writeComment({ ...writeResource, content, t: target ? 2 : 1,
-        ...(target ? { commentId: target.id } : {}) });
+      if (kugou) {
+        await kugouWrite('track.comment.add', { id, text: content });
+      } else {
+        await api.writeComment({ ...writeResource, content, t: target ? 2 : 1,
+          ...(target ? { commentId: target.id } : {}) });
+      }
       if (!active()) return;
       if (input.value === draft) input.value = '';
       if (replyTo === target) setReply(null);
@@ -323,11 +341,19 @@ export async function openComments({ type = 0, id, title = '', provider = 'netea
         }
         toast('回复已同步到网易云');
       } else {
-        toast('评论已同步到网易云');
-        void switchSort('latest');
+        toast(`评论已发送到${platform}`);
+        void switchSort(kugou ? 'hot' : 'latest');
       }
     } catch (error) {
-      if (active()) toast(error.message);
+      if (active()) {
+        if (kugou && error.code === 'binding_required') {
+          updateComposer('');
+          connect.hidden = false;
+          connect.textContent = '重新绑定';
+          sendButton.hidden = true;
+        }
+        toast(error.message);
+      }
     } finally {
       sending = false;
       sendButton.loading = false;
@@ -388,5 +414,12 @@ export async function openComments({ type = 0, id, title = '', provider = 'netea
     else void otherAction(action, cid, button);
   };
 
+  if (kugou) {
+    connect.onclick = () => {
+      if (!auth.token) { close(); location.hash = '#/user'; return; }
+      import('./kugou-account.js').then(m => m.openKugouAccount(loadKugouComposer));
+    };
+    void loadKugouComposer();
+  }
   await switchSort(kugou ? 'hot' : 'recommended');
 }

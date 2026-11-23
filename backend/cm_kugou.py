@@ -1,7 +1,7 @@
 """KuGou concept catalogue and scoped playback through the local upstream."""
 
 from dataclasses import dataclass
-from http.cookies import SimpleCookie
+from http.cookies import CookieError, SimpleCookie
 import json
 import os
 from pathlib import Path
@@ -88,13 +88,18 @@ def server_cookie():
     raise Error(503, "kugou_session_unavailable", "酷狗服务端会话暂不可用")
 
 
-def _api(path, params=None, *, cookie="", jar=None, playback=False):
+def _api(path, params=None, *, cookie="", jar=None, playback=False, payload=None, cookie_names=()):
     url = base()
     if not url:
         raise Error(503, "kugou_unavailable", "酷狗服务暂不可用")
     if params:
         path += "?" + urlencode(params)
-    req = Request(url + path, headers={"Cookie": cookie, "Accept": "application/json"})
+    headers = {"Cookie": cookie, "Accept": "application/json"}
+    data = None
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(payload, ensure_ascii=False).encode()
+    req = Request(url + path, headers=headers, data=data)
     try:
         try:
             response = _opener.open(req, timeout=7)
@@ -106,9 +111,10 @@ def _api(path, params=None, *, cookie="", jar=None, playback=False):
             if jar is not None:
                 for line in response.headers.get_all("Set-Cookie", []):
                     for key, item in SimpleCookie(line).items():
-                        if (key == "dfid" or key.startswith("KUGOU_API_")) and item.value not in ("", "undefined", "-"):
+                        if ((key in cookie_names or key == "dfid" or key.startswith("KUGOU_API_"))
+                                and item.value not in ("", "undefined", "-", "null")):
                             jar[key] = item.value
-    except (OSError, ValueError):
+    except (OSError, ValueError, CookieError):
         raise Error(502, "kugou_upstream_error", "酷狗上游暂不可用") from None
     if not isinstance(result, dict):
         raise Error(502, "kugou_upstream_error", "酷狗上游暂不可用")

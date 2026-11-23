@@ -1,6 +1,9 @@
 """Normalize the KuGou concept catalogue into CurrentMusic service resources."""
 
+from base64 import b64decode
+from binascii import Error as Base64Error
 from datetime import datetime, timedelta, timezone
+import json
 import re
 
 import cm_kugou as kg
@@ -14,6 +17,7 @@ _COLLECTION = re.compile(r"collection_(?:[0-9]+_){2,5}[0-9]+")
 _RANK = re.compile(r"rank_([1-9][0-9]{0,14})_([0-9]{1,15})")
 _WORD = re.compile(r"<(\d+),(\d+),\d+>([^\n<]*)")
 _LINE = re.compile(r"^\[(\d+),\d+\](.*)$")
+_LANGUAGE = re.compile(r"^\[language:([^\]]+)\]$", re.M)
 
 
 def _read(path, params=None):
@@ -228,6 +232,52 @@ def featured_playlists():
     return {"items": _kinds(rows, _playlist), "nextOffset": None}
 
 
+def _krc_aux(raw, count):
+    match = _LANGUAGE.search(raw.replace("\r", ""))
+    if not match:
+        return {}
+    try:
+        language = json.loads(b64decode(match[1], validate=True))
+    except (ValueError, UnicodeError, Base64Error):
+        return {}
+    tracks = language.get("content") if isinstance(language, dict) else None
+    if not isinstance(tracks, list):
+        return {}
+    aux = {}
+    # KuGou type 1 carries translations. Type 0 aligns romanization tokens to the same timed line.
+    for entry in tracks:
+        if not isinstance(entry, dict):
+            continue
+        kind, rows = entry.get("type"), entry.get("lyricContent")
+        if kind not in (0, 1) or not isinstance(rows, list) or len(rows) != count:
+            continue
+        field = "trans" if kind == 1 else "roma"
+        values = []
+        for row in rows:
+            parts = [part for part in row if isinstance(part, str)] if isinstance(row, list) else []
+            separator = " " if kind == 0 and all(part == part.strip() for part in parts) else ""
+            values.append(separator.join(parts).strip())
+        if any(values) and (field not in aux or entry.get("language") == 0):
+            aux[field] = values
+    return aux
+
+
+def _krc_lines(raw):
+    timed = [match for row in raw.splitlines() if (match := _LINE.fullmatch(row))]
+    aux = _krc_aux(raw, len(timed))
+    lines = []
+    # The language vectors count every timed line, including blank lines that the UI skips.
+    for index, match in enumerate(timed):
+        start = int(match[1])
+        words = [[start + int(offset), word] for offset, _, word in _WORD.findall(match[2])]
+        if words:
+            line = {"t": start, "txt": "".join(w[1] for w in words), "w": words, "trans": "", "roma": ""}
+            for field, values in aux.items():
+                line[field] = values[index]
+            lines.append(line)
+    return lines
+
+
 def lyrics(ident):
     song, _, _ = kg.track(ident)
     digest, mix_id = ident.split("-")
@@ -238,12 +288,7 @@ def lyrics(ident):
         candidate = candidates[0]
         parameters = {"id": candidate["id"], "accesskey": candidate["accesskey"], "decode": 1}
         raw = _read("/lyric", {**parameters, "fmt": "krc"}).get("decodeContent") or ""
-        for line in raw.splitlines():
-            if match := _LINE.fullmatch(line):
-                start = int(match[1])
-                words = [[start + int(offset), word] for offset, _, word in _WORD.findall(match[2])]
-                if words:
-                    lines.append({"t": start, "txt": "".join(w[1] for w in words), "w": words, "trans": "", "roma": ""})
+        lines = _krc_lines(raw)
         if not lines:
             raw = _read("/lyric", {**parameters, "fmt": "lrc"}).get("decodeContent") or ""
             lines = [{"t": time, "txt": text, "trans": "", "roma": ""} for time, text in _parse_lrc(raw)]

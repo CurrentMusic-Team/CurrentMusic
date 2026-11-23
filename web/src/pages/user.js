@@ -1,3 +1,5 @@
+import { kugouAccountRequest } from '../kugou.js';
+import { musicPlatform } from '../music-platform.js';
 import { passkeyLogin } from '../passkeys.js';
 import { afterLogin, startWelcome, authArt } from '../auth-flow.js';
 import { finishLogin } from '../twofactor.js';
@@ -468,13 +470,16 @@ function renderAuth(el) {
 
 async function renderProfile(el, autoDecor) {
   const profileToken = auth.token;
+  const kugou = musicPlatform() === 'kugou';
   el.innerHTML = skelProfile();
-  let me = null, pls = [], bind = { bound: false }, follows = [], followCount = 0;
+  let me = null, pls = [], bind = { bound: false }, kgAccount = { enabled: false, bound: false }, follows = [], followCount = 0;
   let decor = { decorations: [], unlocked: false, listenMs: 0, current: '', minListenMs: 7200000, failed: true };
   const jobs = [
     api.me().then(d => { me = d; }).catch(() => {}),
     api.myPlaylists().then(d => { pls = d.playlists || []; }).catch(() => {}),
-    api.bindStatus().then(d => { bind = d; }).catch(() => {}),
+    (kugou
+      ? kugouAccountRequest().then(d => { kgAccount = d; })
+      : api.bindStatus().then(d => { bind = d; })).catch(() => {}),
     api.followedArtists().then(d => { follows = d.artists || []; followCount = d.count || follows.length; }).catch(() => {}),
     // 失败时标记 failed：不能把「没取到」当成「未解锁」，否则限流/断网会误报成还差多少小时
     api.decorations()
@@ -530,6 +535,15 @@ async function renderProfile(el, autoDecor) {
           </div>`).join('')}
       </div>` : ''}
 
+      ${kugou ? `
+      <div class="cm-sec-head"><h2>酷狗概念版账号</h2></div>
+      <div class="cm-bindbox" id="bindBox">
+        <div class="cm-bindinfo">
+          <div class="cm-bindname">${kgAccount.bound ? '已绑定' : '绑定酷狗概念版'}</div>
+          <div class="cm-bindsub">${kgAccount.enabled ? '读取个人云盘和发表歌曲评论' : '此服务暂未开启酷狗个人账号'}</div>
+        </div>
+        ${kgAccount.enabled ? `<mdui-button variant="tonal" id="goKugouBind">${kgAccount.bound ? '管理绑定' : '立即绑定'}</mdui-button>` : ''}
+      </div>` : `
       <div class="cm-sec-head"><h2>网易云账号</h2></div>
       <div class="cm-bindbox" id="bindBox">${
         bind.bound
@@ -550,7 +564,7 @@ async function renderProfile(el, autoDecor) {
                <div class="cm-bindsub">手机验证码或扫码授权均可，绑定后自动同步你网易云 APP 里的全部歌单</div>
              </div>
              <mdui-button variant="filled" id="goBind">立即绑定</mdui-button>`
-      }</div>
+      }</div>`}
       ${bind.bound && bind.profile && bind.profile.uid ? `
       <section class="cm-sec" id="simiUserSec" hidden>
         <div class="cm-sec-head"><h2>相似用户</h2><span class="cm-sec-sub">按你的网易云口味推荐</span></div>
@@ -566,7 +580,7 @@ async function renderProfile(el, autoDecor) {
           <div class="cm-setting" id="goMsg"><span class="material-icons-outlined">forum</span>消息与私信<i>私信 / 评论 / 通知</i></div>
           <div class="cm-setting" id="goFollow"><span class="material-icons-outlined">group</span>关注与状态<i>关注 / 粉丝 / 我的状态</i></div>
           <div class="cm-setting" id="goEvents"><span class="material-icons-outlined">dynamic_feed</span>动态与话题<i>广场 / 我的动态 / 评论历史</i></div>
-          <div class="cm-setting" id="goAccount"><span class="material-icons-outlined">manage_accounts</span>网易云账号资料<i>资料 / 签到 / 设备</i></div>
+          <div class="cm-setting" id="goAccount"><span class="material-icons-outlined">manage_accounts</span>${kugou ? '酷狗概念版账号' : '网易云账号资料'}<i>${kugou ? '绑定 / 云盘 / 评论' : '资料 / 签到 / 设备'}</i></div>
           <div class="cm-setting" id="goCloud"><span class="material-icons-outlined">cloud</span>音乐云盘<i>我的云盘 / 音频</i></div>
           <div class="cm-setting" id="goRadio"><span class="material-icons-outlined">radio</span>电台<i>推荐 / 分类 / 榜单 / 订阅</i></div>
           <div class="cm-setting" id="goPodcast"><span class="material-icons-outlined">podcasts</span>播客与私人 FM<i>我的播客 / 发现 / 广播 / FM</i></div>
@@ -633,6 +647,10 @@ async function renderProfile(el, autoDecor) {
     }).catch(() => {});
   }
 
+  el.querySelector('#goKugouBind')?.addEventListener('click', () => {
+    import('../kugou-account.js').then(m => m.openKugouAccount(() => renderProfile(el)));
+  });
+
   // 网易云绑定交互
   el.querySelector('#goBind')?.addEventListener('click', () => {
     import('../ncmbind.js').then(m => m.bindDialog(() => renderProfile(el)));
@@ -685,7 +703,13 @@ async function renderProfile(el, autoDecor) {
   el.querySelector('#goMsg').onclick = () => { location.hash = '#/messages'; };
   el.querySelector('#goFollow').onclick = () => { location.hash = '#/follow'; };
   el.querySelector('#goEvents').onclick = () => { location.hash = '#/events'; };
-  el.querySelector('#goAccount').onclick = () => { location.hash = '#/account'; };
+  el.querySelector('#goAccount').onclick = () => {
+    if (kugou) {
+      import('../kugou-account.js').then(m => m.openKugouAccount(() => renderProfile(el)));
+    } else {
+      location.hash = '#/account';
+    }
+  };
   el.querySelector('#goCloud').onclick = () => { location.hash = '#/cloud'; };
   el.querySelector('#goRadio').onclick = () => { location.hash = '#/radio'; };
   el.querySelector('#goPodcast').onclick = () => { location.hash = '#/podcast'; };
