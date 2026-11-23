@@ -1,26 +1,43 @@
 // 歌单库页：网易云同步歌单 + 我的歌单 + 我喜欢的/收藏（排行榜已移至首页）
 import { mdui } from '../md.js';
 import { api, auth } from '../api.js';
+import { kugouRequest } from '../kugou.js';
+import { kugouPersonalLink, kugouPlaylists, kugouWrite } from '../kugou-library.js';
+import { musicPlatform } from '../music-platform.js';
 import { esc, toast, confirmDialog, promptDialog, skelGrid } from '../ui.js';
 
 export async function render(el) {
+  const kugou = musicPlatform() === 'kugou';
   if (!auth.token) {
     el.innerHTML = `<div class="cm-login-tip page">
       <span class="material-icons-outlined" style="font-size:calc(44px * var(--cm-fs, 1))">library_music</span>
-      <div>登录后即可创建歌单、收藏歌曲、同步网易云歌单</div>
+      <div>${kugou ? '登录后即可创建歌单和收藏酷狗歌曲' : '登录后即可创建歌单、收藏歌曲、同步网易云歌单'}</div>
       <mdui-button variant="filled" href="#/user">去登录</mdui-button>
     </div>`;
     return;
   }
 
   el.innerHTML = skelGrid(6);
-  let me = null, pls = [], bind = { bound: false };
-  const jobs = [
-    api.me().then(d => { me = d; }).catch(() => {}),
-    api.myPlaylists().then(d => { pls = d.playlists || []; }).catch(() => {}),
-    api.bindStatus().then(d => { bind = d; }).catch(() => {}),
-  ];
-  await Promise.allSettled(jobs);
+  let me = null, pls = [], bind = { bound: false }, favorites = 0;
+  if (kugou) {
+    try {
+      const [playlists, liked] = await Promise.all([
+        kugouPlaylists(),
+        kugouRequest('library.favorites', { limit: 1 }),
+      ]);
+      pls = playlists;
+      favorites = liked.total;
+    } catch (error) {
+      el.innerHTML = `<div class="cm-empty">${esc(error.message)}</div>`;
+      return;
+    }
+  } else {
+    await Promise.allSettled([
+      api.me().then(d => { me = d; }),
+      api.myPlaylists().then(d => { pls = d.playlists || []; }),
+      api.bindStatus().then(d => { bind = d; }),
+    ]);
+  }
 
   // 网易云同步：按 /user/playlist 的上游顺序展示（我喜欢的音乐 → 自建 → 收藏），
   // 与网易云 App「我的 → 音乐」一致；本地歌单仍按创建时间倒序。
@@ -48,22 +65,22 @@ export async function render(el) {
       scheduleMidnightSync();
     }, Math.max(1000, next - now));
   };
-  scheduleMidnightSync();
+  if (!kugou) scheduleMidnightSync();
 
   el.innerHTML = `
     <div class="cm-quickrow">
-      <a class="cm-quick" href="#/pl/likes"><span class="material-icons-outlined">favorite</span><b>CurrentMusic·我喜欢</b><i>${me ? me.stat.likes : 0} 首</i></a>
+      <a class="cm-quick" href="${kugou ? kugouPersonalLink() : '#/pl/likes'}"><span class="material-icons-outlined">favorite</span><b>${kugou ? '酷狗概念版' : 'CurrentMusic'}·我喜欢</b><i>${kugou ? favorites : me?.stat?.likes || 0} 首</i></a>
       ${bind.bound && bind.ncmLikedPlId
         ? `<a class="cm-quick" href="#/pl/${bind.ncmLikedPlId}"><span class="material-icons-outlined">cloud_done</span><b>网易云·我喜欢</b><i>红心歌单</i></a>`
         : ''}
     </div>
 
-    ${ncmPls.length || bind.bound ? `
+    ${kugou ? '' : ncmPls.length || bind.bound ? `
     <div class="cm-sec-head"><h2>网易云同步</h2>
       <span class="cm-sec-more" id="syncNcm"><span class="material-icons-outlined">refresh</span> 刷新歌单</span></div>
     <div class="cm-plgrid" id="ncmGrid">
       ${ncmPls.map(p => `
-        <div class="cm-plcard" data-id="${p.id}">
+        <div class="cm-plcard" data-id="${esc(p.id)}">
           <div class="cm-plcover">${coverHTML(p)}<span class="cm-ncmbadge">网易云</span></div>
           <div class="cm-plname">${esc(p.name)}</div>
           <div class="cm-plsub">${p.track_count} 首</div>
@@ -76,15 +93,15 @@ export async function render(el) {
     </div>`}
 
     <div class="cm-sec-head"><h2>我的歌单</h2>
-      <span class="cm-sec-more" id="plazaEntry"><span class="material-icons-outlined">explore</span> 歌单广场</span>
+      ${kugou ? '' : '<span class="cm-sec-more" id="plazaEntry"><span class="material-icons-outlined">explore</span> 歌单广场</span>'}
       <span class="cm-sec-more" id="newPl"><span class="material-icons-outlined">add</span> 新建</span></div>
     <div class="cm-plgrid" id="plGrid">
       ${localPls.map(p => `
-        <div class="cm-plcard" data-id="${p.id}">
+        <div class="cm-plcard" data-id="${esc(p.id)}">
           <div class="cm-plcover">${coverHTML(p)}</div>
           <div class="cm-plname">${esc(p.name)}</div>
           <div class="cm-plsub">${p.track_count} 首</div>
-          <div class="cm-plmenu" data-id="${p.id}"><span class="material-icons-outlined">more_vert</span></div>
+          <div class="cm-plmenu" data-id="${esc(p.id)}"><span class="material-icons-outlined">more_vert</span></div>
         </div>`).join('') || `<div class="cm-empty small">还没有歌单，点右上角新建</div>`}
     </div>
 
@@ -113,17 +130,22 @@ export async function render(el) {
   el.querySelector('#newPl').onclick = () => {
     promptDialog({
       title: '新建歌单', label: '歌单名称', placeholder: '给歌单起个名字',
-      onOk: async name => { await api.createPlaylist(name, ''); toast('歌单已创建'); render(el); },
+      onOk: async name => {
+        if (kugou) await kugouWrite('library.playlist.create', { name });
+        else await api.createPlaylist(name, '');
+        toast('歌单已创建');
+        render(el);
+      },
     });
   };
-  el.querySelector('#plazaEntry').onclick = () => { location.hash = '#/plaza'; };
+  el.querySelector('#plazaEntry')?.addEventListener('click', () => { location.hash = '#/plaza'; });
   el.querySelectorAll('.cm-plcard').forEach(c => {
-    c.onclick = e => { if (!e.target.closest('.cm-plmenu')) location.hash = `#/pl/${c.dataset.id}`; };
+    c.onclick = e => { if (!e.target.closest('.cm-plmenu')) location.hash = kugou ? kugouPersonalLink(c.dataset.id) : `#/pl/${c.dataset.id}`; };
   });
   el.querySelectorAll('.cm-plmenu').forEach(m => {
     m.onclick = e => {
       e.stopPropagation();
-      const pid = +m.dataset.id;
+      const pid = kugou ? m.dataset.id : Number(m.dataset.id);
       const pl = localPls.find(p => p.id === pid);
       if (!pl) return;
       mdui.dialog({
@@ -139,14 +161,24 @@ export async function render(el) {
           document.querySelectorAll('mdui-dialog').forEach(d => d.open = false);
           promptDialog({
             title: '重命名歌单', label: '新名称', value: pl.name,
-            onOk: async name => { await api.updatePlaylist(pid, { name }); toast('已重命名'); render(el); },
+            onOk: async name => {
+              if (kugou) await kugouWrite('library.playlist.edit', { id: pid, name });
+              else await api.updatePlaylist(pid, { name });
+              toast('已重命名');
+              render(el);
+            },
           });
         };
         document.getElementById('mDel').onclick = () => {
           document.querySelectorAll('mdui-dialog').forEach(d => d.open = false);
           confirmDialog({
             title: `删除歌单「${pl.name}」？`, body: '删除后不可恢复。',
-            onOk: async () => { await api.deletePlaylist(pid); toast('已删除'); render(el); },
+            onOk: async () => {
+              if (kugou) await kugouWrite('library.playlist.delete', { id: pid });
+              else await api.deletePlaylist(pid);
+              toast('已删除');
+              render(el);
+            },
           });
         };
       }, 0);

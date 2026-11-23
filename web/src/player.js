@@ -1,3 +1,4 @@
+import { kugouWrite } from './kugou-library.js';
 import { network, probeLines, swapLine, lineBest, famOf, sourceIdentity } from './network.js';
 // 播放引擎：单例 audio、队列、自动音质、循环/随机、MediaSession。
 import { mdui } from './md.js';
@@ -762,15 +763,17 @@ export const player = {
   },
 
   report() {
-    if (!auth.token || !this.meta || isKugouSong(this.meta)) return;
+    if (!auth.token || !this.meta) return;
     lastTickT = -1;
     lastCastAt = 0;
     lastFlushAt = 0;
     const duration = Number(this.meta.duration);
     const firstSyncAt = duration > 0 ? Math.min(30000, Math.max(1000, Math.floor(duration / 2))) : 30000;
+    const kugouId = isKugouSong(this.meta) ? this.meta.kugou_id : null;
+    const start = kugouId ? kugouWrite('history.record', { id: kugouId }) : api.recordPlay(this.meta);
     listenSession = {
-      id: this.meta.ncm_id, token: auth.token, totalMs: 0, sentMs: 0, firstSyncAt, relaySent: false,
-      start: api.recordPlay(this.meta).catch(() => null),
+      id: this.meta.ncm_id, kugouId, base: settings.base, token: auth.token, totalMs: 0, sentMs: 0, firstSyncAt, relaySent: false,
+      start: start.catch(() => null),
     };
   },
 
@@ -778,7 +781,7 @@ export const player = {
   async reportNcmState() {
     const session = listenSession;
     const threshold = Math.min(30000, this.durMs() / 2 || 30000);
-    if (!session || session.token !== auth.token || session.relaySent || session.totalMs < threshold) return;
+    if (!session || session.kugouId || session.token !== auth.token || session.relaySent || session.totalMs < threshold) return;
     session.relaySent = true;
     try {
       if (!this._relaySession) {
@@ -993,17 +996,20 @@ function accumulateCast() {
 async function flushListen(finished = false) {
   const session = listenSession;
   if (finished) listenSession = null;
-  if (!session || session.token !== auth.token) return;
+  if (!session || session.token !== auth.token || session.base !== settings.base) return;
   const totalMs = Math.round(session.totalMs);
   const previousMs = session.sentMs;
   if (finished ? !totalMs : totalMs - previousMs < 1000) return;
   session.sentMs = totalMs;
   const started = await session.start;
-  if (!started || session.token !== auth.token) return;
+  if (!started || session.token !== auth.token || session.base !== settings.base) return;
   const playId = started.playId;
   const body = playId ? { playId, totalMs, finished } : { ms: totalMs - previousMs };
   if (!playId && body.ms <= 0) return;
-  try { await api.reportListen(session.id, body); }
+  try {
+    if (session.kugouId) await kugouWrite('history.record', { id: session.kugouId, playId, elapsedMs: totalMs });
+    else await api.reportListen(session.id, body);
+  }
   catch { if (session.sentMs === totalMs) session.sentMs = previousMs; }
 }
 

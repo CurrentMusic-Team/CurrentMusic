@@ -9,6 +9,7 @@ from urllib.parse import urlencode, urlsplit
 import cm_db
 import cm_kugou
 import cm_kugou_catalog
+import cm_kugou_library
 import cm_ncm
 import cm_passport
 import cm_qq
@@ -459,19 +460,86 @@ OPERATIONS = {
     "playback.resolve": Operation("播放取址", play, "music.play", providers=("netease", "kugou"), media="playback"),
     "playback.mv": Operation("MV 取址", mv, "music.play", media="mv"),
     "playback.download": Operation("下载取址", download, "music.download", media="download"),
-    "library.favorites": Operation("收藏", favorites, "music.library.read"),
-    "library.favorite.set": Operation("修改收藏", favorite_set, "music.library.write", write=True),
-    "library.playlists": Operation("个人歌单", user_playlists, "music.library.read"),
-    "library.playlist": Operation("个人歌单详情", user_playlist, "music.library.read"),
-    "library.playlist.create": Operation("新建歌单", playlist_create, "music.library.write", write=True),
-    "library.playlist.edit": Operation("编辑歌单", playlist_edit, "music.library.write", write=True),
-    "library.playlist.delete": Operation("删除歌单", playlist_delete, "music.library.write", write=True),
-    "library.playlist.tracks": Operation("修改歌单曲目", playlist_tracks, "music.library.write", write=True),
+    "library.favorites": Operation("收藏", favorites, "music.library.read", providers=("netease", "kugou")),
+    "library.favorite.status": Operation("查询收藏状态", None, "music.library.read", providers=("kugou",)),
+    "library.favorite.set": Operation("修改收藏", favorite_set, "music.library.write", providers=("netease", "kugou"), write=True),
+    "library.playlists": Operation("个人歌单", user_playlists, "music.library.read", providers=("netease", "kugou")),
+    "library.playlist": Operation("个人歌单详情", user_playlist, "music.library.read", providers=("netease", "kugou")),
+    "library.playlist.create": Operation("新建歌单", playlist_create, "music.library.write", providers=("netease", "kugou"), write=True),
+    "library.playlist.edit": Operation("编辑歌单", playlist_edit, "music.library.write", providers=("netease", "kugou"), write=True),
+    "library.playlist.delete": Operation("删除歌单", playlist_delete, "music.library.write", providers=("netease", "kugou"), write=True),
+    "library.playlist.tracks": Operation("修改歌单曲目", playlist_tracks, "music.library.write", providers=("netease", "kugou"), write=True),
     "library.cloud": Operation("云盘曲库", cloud, "music.cloud.read", media="cloud"),
-    "history.recent": Operation("最近播放", recent, "music.history.read"),
-    "history.record": Operation("记录播放进度", history_record, "music.history.write", write=True),
+    "history.recent": Operation("最近播放", recent, "music.history.read", providers=("netease", "kugou")),
+    "history.record": Operation("记录播放进度", history_record, "music.history.write", providers=("netease", "kugou"), write=True),
     "roaming.songs": Operation("私人漫游", roaming_songs, "music.library.read"),
 }
+
+
+def scope_capability(scope):
+    if scope in ("music.play", "music.download"):
+        return "access.playback"
+    if scope.startswith(("music.library.", "music.cloud.")):
+        return "access.library"
+    if scope == "music.comment.write":
+        return "access.community"
+    return ""
+
+
+def _kugou_track_id(data):
+    ident = reference(data)
+    if not cm_kugou._record.fullmatch(ident):
+        error(400, "invalid_input", "酷狗曲目 ID 格式错误")
+    return ident
+
+
+def _kugou_track_ids(data, key, *, maximum=50):
+    ids = data.get(key)
+    if not isinstance(ids, list) or not 1 <= len(ids) <= maximum:
+        error(400, "invalid_input", f"需要 1–{maximum} 个酷狗歌曲 ID")
+    return list(dict.fromkeys(_kugou_track_id({"id": ident}) for ident in ids))
+
+
+def _kugou_selected(data):
+    selected = data.get("selected")
+    if type(selected) is not bool:
+        error(400, "invalid_input", "selected 须为布尔值")
+    return selected
+
+
+def _kugou_personal(operation, data, uid):
+    library = cm_kugou_library
+    if operation == "library.favorites":
+        return library.favorites(uid, *paging(data))
+    if operation == "library.favorite.status":
+        return library.favorite_status(uid, _kugou_track_ids(data, "ids", maximum=100))
+    if operation == "library.favorite.set":
+        return library.favorite_set(uid, _kugou_track_id(data), _kugou_selected(data))
+    if operation == "library.playlists":
+        return library.playlists(uid, *paging(data))
+    if operation == "library.playlist":
+        return library.playlist(uid, reference(data), *paging(data))
+    if operation in ("library.playlist.create", "library.playlist.edit"):
+        name = string(data, "name", 100)
+        if not name.strip():
+            error(400, "invalid_input", "需要歌单名称")
+        description = string(data, "description", 300)
+        if operation == "library.playlist.create":
+            ids = _kugou_track_ids(data, "trackIds") if "trackIds" in data else []
+            return library.playlist_create(uid, name, description, ids)
+        return library.playlist_edit(uid, reference(data), name, description if "description" in data else None)
+    if operation == "library.playlist.delete":
+        return library.playlist_delete(uid, reference(data))
+    if operation == "library.playlist.tracks":
+        return library.playlist_tracks(uid, reference(data), _kugou_track_ids(data, "trackIds"), _kugou_selected(data))
+    if operation == "history.recent":
+        return library.recent(uid, *paging(data))
+    if operation == "history.record":
+        ident = _kugou_track_id(data)
+        if "playId" in data:
+            return library.record(uid, ident, ncm_id(data, "playId"), integer(data, "elapsedMs", 0, 4 * 3600 * 1000))
+        return library.record(uid, ident, None, 0)
+    error(404, "unsupported_operation", "该服务未开放此酷狗能力")
 
 
 def principal(header, scope):
@@ -502,8 +570,11 @@ def kugou_operation(operation, data, uid, origin):
         error(404, "unsupported_operation", "该服务未开放此酷狗能力")
     if not isinstance(data, dict):
         error(400, "invalid_input", "需要 input 对象")
-    if entry.scope == "music.play" and not cm_kugou.authorized_user(cm_db.get_user(uid)):
-        error(403, "account_access_restricted", "当前账号没有播放权限")
+    if entry.scope:
+        if not cm_kugou.authorized_user(cm_db.get_user(uid), scope_capability(entry.scope)):
+            error(403, "account_access_restricted", "当前账号的这项服务访问权限已被限制")
+    if operation.startswith(("library.", "history.")):
+        return _kugou_personal(operation, data, uid)
     if operation in ("catalog.search", "discover.suggest"):
         query = string(data, "query", 60)
         if not query:

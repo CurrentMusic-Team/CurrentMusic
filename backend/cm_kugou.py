@@ -58,7 +58,7 @@ def playback_enabled():
     return bool(base() and os.environ.get("CM_KUGOU_PLAYBACK") == "1" and os.environ.get("CM_KUGOU_COOKIE_FILE"))
 
 
-def authorized_user(user):
+def authorized_user(user, capability="access.playback"):
     if not user or user.get("disabled"):
         return False
     try:
@@ -67,7 +67,7 @@ def authorized_user(user):
         if exc.name != "cm_permissions":
             raise
         return True  # Older deployments gate playback through the authenticated session alone.
-    return cm_permissions.allowed(user, "access.playback")
+    return not capability or cm_permissions.allowed(user, capability)
 
 
 def server_cookie():
@@ -179,19 +179,44 @@ def search(query, offset, limit):
     return {"items": items, "nextOffset": offset + len(rows) if rows and has_more else None}
 
 
+def _track_parts(row):
+    metadata, audio = row.get("base") or {}, row.get("audio_info") or {}
+    ident = f"{str(audio.get('hash') or '').lower()}-{metadata.get('album_audio_id')}"
+    if not _record.fullmatch(ident):
+        return None
+    resource = _track(ident, metadata.get("songname"), metadata.get("author_name"), metadata.get("album_name"),
+                      (row.get("album_info") or {}).get("sizable_cover"), audio.get("timelength"))
+    return resource, metadata, audio
+
+
+def _details(mix_ids):
+    payload = _api("/krm/audio", {"album_audio_id": ",".join(mix_ids), "fields": "base,audio_info,album_info"},
+                   cookie=_catalog_cookie())
+    result = {}
+    for row in payload.get("data") or []:
+        if isinstance(row, dict) and (parts := _track_parts(row)):
+            result[parts[0]["id"]] = parts
+    return result
+
+
 def track(ident):
     match = _record.fullmatch(ident)
     if not match:
         raise Error(400, "invalid_input", "酷狗曲目 ID 格式错误")
-    expected_hash, mix_id = match.groups()
-    payload = _api("/krm/audio", {"album_audio_id": mix_id, "fields": "base,audio_info,album_info"},
-                   cookie=_catalog_cookie())
-    for row in payload.get("data") or []:
-        metadata, audio = row.get("base") or {}, row.get("audio_info") or {}
-        if str(metadata.get("album_audio_id")) == mix_id and str(audio.get("hash", "")).lower() == expected_hash:
-            return _track(ident, metadata.get("songname"), metadata.get("author_name"), metadata.get("album_name"),
-                          (row.get("album_info") or {}).get("sizable_cover"), audio.get("timelength")), metadata, audio
+    result = _details([match[2]])
+    if ident in result:
+        return result[ident]
     raise Error(404, "not_found", "未找到该酷狗录音")
+
+
+def tracks(ids):
+    mix_ids = list(dict.fromkeys(ident.split("-")[1] for ident in ids))
+    result = {}
+    for index in range(0, len(mix_ids), 20):
+        result.update(_details(mix_ids[index:index + 20]))
+    if any(ident not in result for ident in ids):
+        raise Error(404, "not_found", "未找到所选酷狗录音")
+    return [result[ident][0] for ident in ids]
 
 
 def _variants(ident, metadata, audio, cookie):

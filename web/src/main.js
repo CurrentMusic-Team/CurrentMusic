@@ -111,6 +111,8 @@ const ROUTES = [
   { re: /^#\/kugou(?:\/([a-f0-9]{32}-[1-9][0-9]{0,14}))?$/, page: kugouMusic, title: '酷狗音乐' },
   { re: /^#\/kugou\/(album|artist|playlist)\/([a-zA-Z0-9_]{1,80})$/, page: playlist, title: '酷狗概念版',
     fixed: m => ['kugou-' + m[1], m[2]] },
+  { re: /^#\/kugou\/me\/favorites$/, page: playlist, title: '我喜欢的音乐', fixed: ['kugou-favorites'] },
+  { re: /^#\/kugou\/me\/playlist\/(kgp_[1-9][0-9]{0,18})$/, page: playlist, title: '我的歌单', fixed: m => ['kugou-personal', m[1]] },
   { re: /^#\/kugou\/charts$/, page: playlist, title: '排行榜', fixed: ['kugou-charts'] },
   { re: /^#\/square$/, page: squarePage, title: '发现' },
   { re: /^#\/u\/(\d+)$/, page: profilePage, title: '用户主页', fixed: m => [m[1]] },
@@ -230,7 +232,7 @@ async function router({ refresh = false } = {}) {
     : routePath === '#/user' && !auth.token ? '登录与注册' : matched.title;
   document.querySelectorAll('#bottomNav .navItem').forEach(a => {
     const active = a.getAttribute('href') === routePath.split('/').slice(0, 2).join('/')
-      || (a.getAttribute('href') === '#/library' && /^#\/(pl|ncmpl)\//.test(routePath));
+      || (a.getAttribute('href') === '#/library' && /^#\/(pl|ncmpl|kugou\/me)\//.test(routePath));
     a.classList.toggle('cur', active);
     if (active) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');

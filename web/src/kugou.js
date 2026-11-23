@@ -19,9 +19,10 @@ export function kugouQuality(value) {
 
 export async function kugouRequest(operation, body) {
   const base = settings.base, token = auth.token;
+  const needsAuth = /^(playback|library|history)\./.test(operation) || operation === 'discover.recommendations';
   const response = await call(operation === 'capabilities' ? 'GET' : 'POST',
     operation === 'capabilities' ? '/kugou/capabilities' : '/kugou/v1/' + operation,
-    { base, body, auth: operation.startsWith('playback.') || operation === 'discover.recommendations', redirect: 'error' });
+    { base, body, auth: needsAuth, keepalive: operation === 'history.record', redirect: 'error' });
   if (base !== settings.base || token !== auth.token) throw new Error('账号或服务器已切换，请重试');
   return response;
 }

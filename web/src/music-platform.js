@@ -41,10 +41,11 @@ export async function kugouDaily(charts) {
 
 export async function kugouHome() {
   const charts = kugouRequest('discover.charts', {}).catch(() => null);
-  const [daily, ranks, playlists] = await Promise.all([
+  const [daily, ranks, playlists, recent] = await Promise.all([
     kugouDaily(charts).catch(() => []),
     charts,
     kugouRequest('discover.playlists', {}).catch(() => null),
+    auth.token ? kugouRequest('history.recent', { limit: 20 }).catch(() => null) : null,
   ]);
-  return { daily, charts: ranks?.items || [], playlists: playlists?.items || [] };
+  return { daily, charts: ranks?.items || [], playlists: playlists?.items || [], recent: kugouSongs(recent?.items) };
 }
