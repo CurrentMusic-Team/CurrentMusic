@@ -2,6 +2,7 @@
 import { api, auth, ncmSongs, settings } from '../api.js';
 import { esc, renderSongList, skelCards, skelList, toast } from '../ui.js';
 import { player } from '../player.js';
+import { bindPlatformSelector, kugouDetailLink, kugouHome, musicPlatform, platformSelector } from '../music-platform.js';
 import { levelBadge } from '../level-badges.js';
 
 // 首页顶部问候区（v1.28.37）：完整日期 + 星期 + 秒级时钟 + 按时段问候。
@@ -23,7 +24,7 @@ function greetWho() {
   return auth.user ? auth.user.nickname : '今天想听点什么？';
 }
 
-function greetMarkup() {
+function greetMarkup(platform) {
   const d = new Date();
   const date = `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
   const clock = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
@@ -36,6 +37,7 @@ function greetMarkup() {
         <time class="cm-greet-clock" id="greetClock">${clock}</time>
       </div>
       <div class="cm-greet-title" id="greetTitle">${esc(periodOf(d.getHours()))}，${esc(greetWho())}</div>
+      ${platformSelector(platform)}
     </div>`;
 }
 
@@ -110,7 +112,7 @@ function heroHTML(daily, recPls) {
   (recPls || []).slice(0, 2).forEach((p, i) => {
     if (!p || !p.picUrl) return;
     items.push({
-      kind: 'pl', id: p.id, pic: `${p.picUrl}?param=800y800`, tint: HERO_TINT[i % 2],
+      kind: 'pl', href: p.href || `#/ncmpl/${p.id}`, pic: `${p.picUrl}?param=800y800`, tint: HERO_TINT[i % 2],
       eyebrow: '精选歌单', title: p.name, sub: p.trackCount ? `${p.trackCount} 首` : '',
     });
   });
@@ -152,18 +154,28 @@ function renderHeroItems(items) {
         ${it.sub ? `<span class="cm-hero__sub">${esc(it.sub)}</span>` : ''}
       </span>`;
     return it.kind === 'pl'
-      ? `<a class="cm-hero__card" href="#/ncmpl/${it.id}" style="--h1:${it.tint[0]};--h2:${it.tint[1]}">${inner}</a>`
+      ? `<a class="cm-hero__card" href="${esc(it.href)}" style="--h1:${it.tint[0]};--h2:${it.tint[1]}">${inner}</a>`
       : `<button type="button" class="cm-hero__card" data-hero-song="${it.songIdx}" style="--h1:${it.tint[0]};--h2:${it.tint[1]}">${inner}</button>`;
   }).join('')}</section>`;
 }
 
 export async function render(el) {
+  const platform = musicPlatform();
+  const kugou = platform === 'kugou';
+  const bindSelector = () => bindPlatformSelector(el, () => render(el));
   el.innerHTML = `
     ${cmxBannerHTML()}
-    ${greetMarkup()}
+    ${greetMarkup(platform)}
     <section class="cm-sec"><div class="cm-sec-head"><h2>每日推荐</h2></div>${skelCards(8)}</section>
     <section class="cm-sec">${skelList(3)}</section>`;
   startGreetClock(el);
+  bindSelector();
+  const initialSelector = el.querySelector('.cm-platform-select');
+  let charts = [
+    { id: '3778678', name: '热歌榜' }, { id: '19723756', name: '飙升榜' }, { id: '3779629', name: '新歌榜' },
+  ];
+  const chartHref = id => kugou ? kugouDetailLink('playlist', id) : `#/ncmpl/${id}`;
+
   // 横幅不阻塞首屏：与每日推荐并行请求；结果先存起来，整页重渲染后再插入
   let bannerHTML = '';
   let daily = [], forYou = [], recent = [], artists = [];
@@ -171,38 +183,50 @@ export async function render(el) {
   // 首屏聚合（v1.28.3）：me/daily/bind/recent 一次请求取回，服务端并行查好。
   // 原先这四条要各自建立连接（移动网络下每次 TLS 握手都要付出代价）。
   // 旧服务端没有 /bootstrap → boot 为 null，走下面的回退分支，行为与之前完全一致。
-  const boot = await api.bootstrap().catch(() => null);
-  if (boot && boot.daily) {
-    daily = boot.daily.daily || [];
-    forYou = boot.daily.forYou || [];
-    artists = boot.daily.artists || [];
-    bannerHTML = accountBannersFromMe(boot.me);
-    ncmBound = !!(boot.bind && boot.bind.bound);
-    recent = (boot.recent && boot.recent.songs) || [];
+  if (kugou) {
+    const [data, banner] = await Promise.all([kugouHome(), accountBannersHTML()]);
+    daily = data.daily;
+    const mainRanks = ['TOP500', '飙升榜', '新歌榜'];
+    charts = mainRanks.map(name => data.charts.find(item => item.name === name)).filter(Boolean);
+    recPls = data.playlists.map(item => ({ ...item, picUrl: item.artwork, href: chartHref(item.id) }));
+    bannerHTML = banner;
   } else {
-    const bannerJob = accountBannersHTML().then(html => { bannerHTML = html; });
-    const jobs = [api.daily().then(d => { daily = d.daily || []; forYou = d.forYou || []; artists = d.artists || []; }).catch(() => {})];
-    if (auth.token) jobs.push(api.bindStatus().then(b => { if (b && b.bound) ncmBound = true; }).catch(() => {}));
-    if (auth.token) jobs.push(api.recentPlays(20).then(d => { recent = d.songs || []; }).catch(() => {}));
-    await Promise.allSettled(jobs);
-    await bannerJob;   // 横幅请求通常更快，这里几乎立即返回
+    const boot = await api.bootstrap().catch(() => null);
+    if (boot && boot.daily) {
+      daily = boot.daily.daily || [];
+      forYou = boot.daily.forYou || [];
+      artists = boot.daily.artists || [];
+      bannerHTML = accountBannersFromMe(boot.me);
+      ncmBound = !!(boot.bind && boot.bind.bound);
+      recent = (boot.recent && boot.recent.songs) || [];
+    } else {
+      const bannerJob = accountBannersHTML().then(html => { bannerHTML = html; });
+      const jobs = [api.daily().then(d => { daily = d.daily || []; forYou = d.forYou || []; artists = d.artists || []; }).catch(() => {})];
+      if (auth.token) jobs.push(api.bindStatus().then(b => { if (b && b.bound) ncmBound = true; }).catch(() => {}));
+      if (auth.token) jobs.push(api.recentPlays(20).then(d => { recent = d.songs || []; }).catch(() => {}));
+      await Promise.allSettled(jobs);
+      await bannerJob;   // 横幅请求通常更快，这里几乎立即返回
+    }
+    // 每日推荐歌单/每日推荐歌曲是账号维度接口（T1）：必须用用户自己的网易云 cookie，
+    // 且是**上游**接口，所以仍单独取（放进聚合会让整个首屏等上游）。未绑定则整体跳过。
+    if (auth.token && ncmBound) {
+      await Promise.allSettled([
+        api.ncm('/recommend/resource').then(d => { recPls = (d.recommend || []).filter(p => /^[1-9][0-9]*$/.test(String(p?.id))); }),
+        // T1：账号维度的每日推荐。拿到就用它覆盖服务端 SVIP 档（对已绑定用户更准确）
+        api.ncm('/recommend/songs').then(d => {
+          const own = ncmSongs(((d.data || {}).dailySongs) || []);
+          if (own.length) daily = own;
+        }),
+      ]);
+    }
   }
-  // 每日推荐歌单/每日推荐歌曲是账号维度接口（T1）：必须用用户自己的网易云 cookie，
-  // 且是**上游**接口，所以仍单独取（放进聚合会让整个首屏等上游）。未绑定则整体跳过。
-  if (auth.token && ncmBound) {
-    await Promise.allSettled([
-      api.ncm('/recommend/resource').then(d => { recPls = (d.recommend || []).filter(p => /^[1-9][0-9]*$/.test(String(p?.id))); }),
-      // T1：账号维度的每日推荐。拿到就用它覆盖服务端 SVIP 档（对已绑定用户更准确）
-      api.ncm('/recommend/songs').then(d => {
-        const own = ncmSongs(((d.data || {}).dailySongs) || []);
-        if (own.length) daily = own;
-      }),
-    ]);
-  }
+
+  if (el.querySelector('.cm-platform-select') !== initialSelector) return;
+  const keepFocus = document.activeElement === initialSelector;
 
   el.innerHTML = `
     ${cmxBannerHTML()}
-    ${greetMarkup()}
+    ${greetMarkup(platform)}
     ${bannerHTML}
     <section class="cm-sec">
       <div class="cm-sec-head"><h2>一键开听</h2><span class="cm-sec-sub">按听歌动线排</span></div>
@@ -238,9 +262,9 @@ export async function render(el) {
     </section>` : ''}
     ${recPls.length ? `
     <section class="cm-sec">
-      <div class="cm-sec-head"><h2>每日推荐歌单</h2><span class="cm-sec-sub">来自你的网易云账号</span></div>
+      <div class="cm-sec-head"><h2>每日推荐歌单</h2><span class="cm-sec-sub">${kugou ? '酷狗概念版精选' : '来自你的网易云账号'}</span></div>
       <div class="cm-plgrid" id="recPlsGrid">${recPls.slice(0, 6).map(pl => `
-        <div class="cm-plcard" data-id="${pl.id}">
+        <div class="cm-plcard" data-id="${esc(pl.id)}">
           <div class="cm-plcover">${pl.picUrl ? `<img src="${esc(pl.picUrl)}?param=300y300" loading="lazy" onerror="this.remove()">` : ''}<span class="material-icons-outlined">queue_music</span></div>
           <div class="cm-plname">${esc(pl.name)}</div>
           <div class="cm-plsub">${pl.trackCount || 0} 首</div>
@@ -249,9 +273,7 @@ export async function render(el) {
     <section class="cm-sec">
       <div class="cm-sec-head"><h2>排行榜</h2><span class="cm-sec-more" id="goNcmPls"><span class="material-icons-outlined">trending_up</span> 更多榜单</span></div>
       <div class="cm-quickrow">
-        <a class="cm-quick" href="#/ncmpl/3778678"><span class="material-icons-outlined">local_fire_department</span><b>热歌榜</b></a>
-        <a class="cm-quick" href="#/ncmpl/19723756"><span class="material-icons-outlined">trending_up</span><b>飙升榜</b></a>
-        <a class="cm-quick" href="#/ncmpl/3779629"><span class="material-icons-outlined">star</span><b>新歌榜</b></a>
+        ${charts.map((chart, i) => `<a class="cm-quick" href="${esc(chartHref(chart.id))}"><span class="material-icons-outlined">${['local_fire_department', 'trending_up', 'star'][i]}</span><b>${esc(chart.name)}</b></a>`).join('')}
       </div>
     </section>
     ${forYou.length ? `
@@ -271,6 +293,9 @@ export async function render(el) {
     </section>` : ''}
   `;
   startGreetClock(el);            // 正式内容渲染后重启时钟（骨架屏那份随节点替换自动停）
+  bindSelector();
+  if (keepFocus) el.querySelector('.cm-platform-select')?.focus({ preventScroll: true });
+
   // 首页 hero 单独插入（放在问候语之后、第一个区块之前）：不参与整页模板字符串，
   // 数据为空时也不会占位。
   const heroSection = document.documentElement.dataset.uiPreset === 'soaringbird'
@@ -317,15 +342,15 @@ export async function render(el) {
     player.startHeart(seed);
   });
   // 「更多榜单」→ 发现页（那里有完整榜单与分组切换），别做点不动的假入口
-  el.querySelector('#goNcmPls')?.addEventListener('click', () => { location.hash = '#/square'; });
+  el.querySelector('#goNcmPls')?.addEventListener('click', () => { location.hash = kugou ? '#/kugou/charts' : '#/square'; });
   el.querySelectorAll('#recPlsGrid .cm-plcard').forEach(c => {
-    c.onclick = () => { location.hash = `#/ncmpl/${c.dataset.id}`; };
+    c.onclick = () => { location.hash = chartHref(c.dataset.id); };
   });
   // 「不感兴趣」：T2 写操作，需用户绑定 + confirm=1；成功后本地移除该曲
   el.querySelectorAll('#dailyRow .cm-card').forEach(c => {
     const i = +c.dataset.i;
     const s2 = daily[i];
-    if (!s2) return;
+    if (!s2 || kugou) return;
     const btn = document.createElement('span');
     btn.className = 'material-icons-outlined';
     btn.textContent = 'block';

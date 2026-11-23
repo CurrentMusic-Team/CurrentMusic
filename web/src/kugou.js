@@ -21,7 +21,7 @@ export async function kugouRequest(operation, body) {
   const base = settings.base, token = auth.token;
   const response = await call(operation === 'capabilities' ? 'GET' : 'POST',
     operation === 'capabilities' ? '/kugou/capabilities' : '/kugou/v1/' + operation,
-    { base, body, auth: operation.startsWith('playback.'), redirect: 'error' });
+    { base, body, auth: operation.startsWith('playback.') || operation === 'discover.recommendations', redirect: 'error' });
   if (base !== settings.base || token !== auth.token) throw new Error('账号或服务器已切换，请重试');
   return response;
 }
@@ -29,7 +29,7 @@ export async function kugouRequest(operation, body) {
 export function kugouSong(item) {
   if (!TRACK_ID.test(item?.id || '')) return null;
   return { ncm_id: 'kg:' + item.id, provider: 'kugou', kugou_id: item.id, name: item.name,
-    artists: item.artists, album: item.album, pic: item.artwork, duration: item.durationMs };
+    artists: item.artists, album: item.album, pic: item.artwork, duration: item.durationMs, lyricMatch: item.snippet };
 }
 
 export async function resolveKugouSong(song, level) {

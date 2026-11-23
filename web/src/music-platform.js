@@ -1,0 +1,50 @@
+import { auth } from './api.js';
+import { kugouRequest, kugouScope, kugouSong } from './kugou.js';
+
+export function musicPlatform() {
+  return localStorage.getItem('cm.music.platform:' + kugouScope()) === 'kugou' ? 'kugou' : 'netease';
+}
+
+export function platformSelector(platform) {
+  return `<select class="cm-platform-select" aria-label="音乐平台">
+    <option value="netease"${platform === 'netease' ? ' selected' : ''}>网易云音乐</option>
+    <option value="kugou"${platform === 'kugou' ? ' selected' : ''}>酷狗概念版</option>
+  </select>`;
+}
+
+export function bindPlatformSelector(el, onChange) {
+  const select = el.querySelector('.cm-platform-select');
+  if (!select) return;
+  select.onchange = () => {
+    localStorage.setItem('cm.music.platform:' + kugouScope(), select.value);
+    onChange();
+    el.querySelector('.cm-platform-select')?.focus({ preventScroll: true });
+  };
+}
+
+export function kugouDetailLink(kind, id) {
+  return '#/kugou/' + kind + '/' + encodeURIComponent(id);
+}
+
+export const kugouSongs = items => (items || []).map(kugouSong).filter(Boolean);
+
+export async function kugouDaily(charts) {
+  if (auth.token) {
+    const recommended = await kugouRequest('discover.recommendations', {}).catch(() => null);
+    if (recommended?.items.length) return kugouSongs(recommended.items);
+  }
+  const first = (await (charts || kugouRequest('discover.charts', {})))?.items[0];
+  if (!first) return [];
+  const data = await kugouRequest('catalog.playlist', { id: first.id });
+  return kugouSongs(data.tracks);
+}
+
+export async function kugouHome() {
+  const charts = kugouRequest('discover.charts', {}).catch(() => null);
+  const [daily, ranks, playlists] = await Promise.all([
+    kugouDaily(charts).catch(() => []),
+    charts,
+    kugouRequest('discover.playlists', {}).catch(() => null),
+  ]);
+  return { daily, charts: ranks?.items || [], playlists: playlists?.items || [] };
+}

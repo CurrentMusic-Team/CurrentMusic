@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import test_music_service as harness
 import cm_kugou as kg
+import cm_kugou_catalog as catalog
 import cm_music_service as service
 
 
@@ -45,6 +46,20 @@ class KugouGatewayTests(unittest.TestCase):
             self.assertEqual((status, result["items"], headers["Cache-Control"]), (200, [], "no-store"))
             search.assert_called_once_with("fixture", 0, 30)
             self.assertEqual(self.call("POST", "/kugou/v1/playback.resolve", {"id": ID})[0], 401)
+
+
+    def test_catalogue_and_recommendation_authorization(self):
+        _, bearer = self.account("openid music.library.read")
+        with patch.dict(os.environ, {**CONFIG, "CM_KUGOU_PLAYBACK": "0"}), \
+                patch.object(catalog, "recommendations", return_value={"items": []}), \
+                patch.object(catalog, "lyrics", return_value={"lines": []}):
+            _, descriptor, _ = self.call("GET", "/music-service/descriptor")
+            entries = {op["id"]: op for op in descriptor["platforms"]["kugou"]}
+            self.assertEqual(set(entries["catalog.search"]["kinds"]), set(catalog.SEARCH_TYPES))
+            self.assertNotIn("playback.resolve", entries)
+            self.assertEqual(self.operation("track.lyrics", {"id": ID}, provider="kugou")[0], 200)
+            self.assertEqual(self.operation("discover.recommendations", {}, provider="kugou")[0], 401)
+            self.assertEqual(self.operation("discover.recommendations", {}, provider="kugou", bearer=bearer)[0], 200)
 
 
 class KugouAdapterTests(unittest.TestCase):
@@ -112,3 +127,46 @@ class KugouAdapterTests(unittest.TestCase):
             handler.send_header.assert_any_call("Content-Range", "bytes 5-9/30")
             self.assertEqual(request.call_args.args[0].headers, {"Range": "bytes=5-9"})
             self.assertEqual(handler.wfile.getvalue(), b"audio")
+
+
+class KugouCatalogueTests(unittest.TestCase):
+    def test_album_search_preserves_offset_across_upstream_page_boundaries(self):
+        def upstream(path, params):
+            self.assertEqual(path, "/search")
+            self.assertEqual(params["type"], "album")
+            size, page = params["pagesize"], params["page"]
+            first = (page - 1) * size + 1
+            rows = [{"albumid": i, "albumname": f"Album {i}"} for i in range(first, min(first + size, 33))]
+            return {"data": {"lists": rows, "total": 32}}
+
+        with patch("cm_kugou_catalog._read", side_effect=upstream):
+            result = catalog.search("fixture", "album", 28, 3)
+            self.assertEqual([item["id"] for item in result["items"]], ["29", "30", "31"])
+            self.assertEqual(result["nextOffset"], 31)
+            result = catalog.search("fixture", "album", 31, 3)
+            self.assertEqual([item["id"] for item in result["items"]], ["32"])
+            self.assertIsNone(result["nextOffset"])
+
+    def test_krc_uses_absolute_word_timestamps_and_hides_access_key(self):
+        replies = [
+            {"candidates": [{"id": "123", "accesskey": "fixture-key"}]},
+            {"decodeContent": "[1000,350]<0,100,0>甲<100,250,0>乙"},
+        ]
+        with patch.object(kg, "track", return_value=({"durationMs": 2000}, {}, {})), \
+                patch("cm_kugou_catalog._read", side_effect=replies):
+            result = catalog.lyrics(ID)
+        self.assertEqual(result["source"], "kugou:krc")
+        self.assertTrue(result["wordLevel"])
+        self.assertEqual(result["lines"][0]["w"], [[1000, "甲"], [1100, "乙"]])
+        self.assertNotIn("fixture-key", json.dumps(result))
+
+
+    def test_private_collection_is_excluded_before_loading_tracks(self):
+        collection = "collection_3_100_1_0"
+        with patch.object(catalog, "_read", return_value={
+            "data": [{"global_collection_id": collection, "name": "Private fixture", "is_pri": 1}],
+        }) as read:
+            with self.assertRaises(kg.Error) as error:
+                catalog.details("playlist", collection, 0, 20)
+        self.assertEqual(error.exception.status, 404)
+        read.assert_called_once_with("/playlist/detail", {"ids": collection})
