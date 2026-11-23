@@ -1,4 +1,5 @@
 // 首页：每日推荐 + 排行榜 + 猜你喜欢（登录后） + 最近播放（登录后）
+import { kugouWrite } from '../kugou-library.js';
 import { api, auth, ncmSongs, settings } from '../api.js';
 import { esc, renderSongList, skelCards, skelList, toast } from '../ui.js';
 import { player } from '../player.js';
@@ -351,7 +352,7 @@ export async function render(el) {
   el.querySelectorAll('#dailyRow .cm-card').forEach(c => {
     const i = +c.dataset.i;
     const s2 = daily[i];
-    if (!s2 || kugou) return;
+    if (!s2) return;
     const btn = document.createElement('span');
     btn.className = 'material-icons-outlined';
     btn.textContent = 'block';
@@ -359,9 +360,11 @@ export async function render(el) {
     btn.style.cssText = 'position:absolute;top:4px;right:4px;font-size:calc(16px * var(--cm-fs, 1));opacity:.55';
     btn.addEventListener('click', async ev => {
       ev.stopPropagation();
-      if (!ncmBound) return toast('需先绑定网易云账号');
+      if (kugou && !auth.token) return toast('登录后才能标记不感兴趣');
+      if (!kugou && !ncmBound) return toast('需先绑定网易云账号');
       try {
-        await api.ncm('/recommend/songs/dislike', { id: s2.ncm_id, confirm: 1 });
+        if (kugou) await kugouWrite('roaming.skip', { id: s2.kugou_id });
+        else await api.ncm('/recommend/songs/dislike', { id: s2.ncm_id, confirm: 1 });
         toast('已标记不感兴趣');
         c.remove();
       } catch (e) { toast('操作失败：' + e.message); }

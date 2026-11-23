@@ -1,10 +1,11 @@
+import { kugouSongs } from './music-platform.js';
 import { kugouWrite } from './kugou-library.js';
 import { network, probeLines, swapLine, lineBest, famOf, sourceIdentity } from './network.js';
 // 播放引擎：单例 audio、队列、自动音质、循环/随机、MediaSession。
 import { mdui } from './md.js';
 import { api, auth, settings, ncmSongs } from './api.js';
 import { toast, tierLabel } from './ui.js';
-import { isKugouSong, kugouQuality } from './kugou.js';
+import { isKugouSong, kugouQuality, kugouRequest } from './kugou.js';
 import { resolveSongUrl } from './songurl.js';   // 三级音源回退（P2）
 import { buildEqChain, removeEqChain } from './eq.js';   // 均衡器链（挂进音频图）
 import { updateBrowserMediaSession, updateBrowserMediaState } from './media-session.js';
@@ -563,6 +564,11 @@ export const player = {
    * 复用这里才能避免「pid 解析」与「songInfo 解包」两处各错一遍。
    */
   async heartList(seedId, count = 10) {
+    if (String(seedId).startsWith('kg:')) {
+      const excludeIds = this.queue.filter(isKugouSong).slice(-100).map(track => track.kugou_id);
+      const result = await kugouRequest('roaming.songs', { seedId: seedId.slice(3), excludeIds, limit: count });
+      return kugouSongs(result.items);
+    }
     const pid = await this._heartPid();
     const d = await api.ncm('/playmode/intelligence/list', { id: seedId, sid: seedId, pid, count });
     // 上游返回的是 { alg, id, recommended, songInfo } 包装：歌曲本体在 songInfo 里，
@@ -574,7 +580,7 @@ export const player = {
 
   /** 心动模式：以 seed（默认当前曲目）为种子续一批到队尾，返回新增条数。 */
   async heartExtend(seed) {
-    if (this._heartBusy || isKugouSong(seed || this.meta)) return 0;
+    if (this._heartBusy) return 0;
     const id = ((seed || this.meta) || {}).ncm_id;
     if (!id) return 0;
     this._heartBusy = true;
@@ -596,7 +602,7 @@ export const player = {
 
   /** 队列快见底就提前续（异步补齐，不阻塞切歌）。 */
   _heartEnsure() {
-    if (!this.heartMode || this._heartBusy || isKugouSong(this.meta)) return;
+    if (!this.heartMode || this._heartBusy) return;
     if (this._heartMiss >= 3) return;                 // 连续失败：停手，不给上游刷请求
     if (this.queue.length - this.index > 3) return;   // 还够听
     this.heartExtend(this.meta);
@@ -604,7 +610,7 @@ export const player = {
 
   /** 以某首歌为种子开播心动模式（歌曲详情页 / 发现页 / 私人 FM 都走这里）。 */
   async startHeart(seed) {
-    if (!seed || !seed.ncm_id) { toast('这首没有可用的网易云曲目 ID'); return false; }
+    if (!seed || !seed.ncm_id) { toast('这首没有可用的曲目 ID'); return false; }
     this.setHeartMode(true);
     this._heartMiss = 0; this._heartErr = '';
     let fresh = [];

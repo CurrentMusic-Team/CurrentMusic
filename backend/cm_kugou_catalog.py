@@ -8,7 +8,7 @@ from cm_ncm import _parse_lrc
 
 
 SEARCH_TYPES = {"song": "song", "artist": "author", "album": "album",
-                "playlist": "special", "lyric": "lyric"}
+                "playlist": "special", "lyric": "lyric", "mv": "mv"}
 _NUMBER = re.compile(r"[1-9][0-9]{0,14}")
 _COLLECTION = re.compile(r"collection_(?:[0-9]+_){2,5}[0-9]+")
 _RANK = re.compile(r"rank_([1-9][0-9]{0,14})_([0-9]{1,15})")
@@ -36,10 +36,7 @@ def _song(digest, mix_id, name, artists, album, artwork, duration, mv=None):
     ident = f"{str(digest or '').lower()}-{mix_id}"
     if not kg._record.fullmatch(ident) or not name:
         return None
-    item = kg._track(ident, name, artists, album, artwork, duration)
-    if kg._hash.fullmatch(str(mv).lower()):
-        item["videoId"] = str(mv).lower()
-    return item
+    return kg._track(ident, name, artists, album, artwork, duration, mv)
 
 
 def _album(row):
@@ -75,6 +72,30 @@ def _lyric_hit(row):
     return item
 
 
+def _video_hit(row):
+    ident = kg.video_hash(row.get("MvHash"))
+    if not ident:
+        return None
+    item = _resource(ident, "mv", row.get("MvName"), row.get("Pic"), artists=row.get("SingerName"),
+                     description=row.get("Description"))
+    if item:
+        duration = row.get("Duration")
+        item.update(videoId=ident, durationMs=kg._duration(duration * 1000) if type(duration) is int else 0)
+    return item
+
+
+def video(ident):
+    if not kg.video_hash(ident) or ident != ident.lower():
+        raise kg.Error(400, "invalid_input", "酷狗 MV ID 格式错误")
+    rows = _read("/video/privilege", {"hash": ident}).get("data") or []
+    row = next((row for row in rows if kg.video_hash(row.get("hash")) == ident), None)
+    if not row or not row.get("name"):
+        raise kg.Error(404, "not_found", "未找到该酷狗 MV")
+    item = _resource(ident, "mv", row["name"], "", artists=row.get("singer_name"))
+    item["videoId"] = ident
+    return {"resource": item}
+
+
 def _kinds(rows, normalize):
     return [item for row in rows if isinstance(row, dict) and (item := normalize(row))]
 
@@ -88,7 +109,7 @@ def search(query, kind, offset, limit):
         data = _read("/search", {"keywords": query, "type": upstream_kind, "page": page, "pagesize": size}).get("data") or {}
         return data.get("lists", []), data.get("total")
 
-    normalize = {"artist": _artist, "album": _album, "playlist": _playlist, "lyric": _lyric_hit}[kind]
+    normalize = {"artist": _artist, "album": _album, "playlist": _playlist, "lyric": _lyric_hit, "mv": _video_hit}[kind]
     rows, next_offset = _page(fetch, offset, limit)
     return {"items": _kinds(rows, normalize), "nextOffset": next_offset}
 
@@ -252,3 +273,53 @@ def comments(ident, page, limit):
                      "beContent": str(row.get("pcontent") or ""), "replyCount": row.get("reply_num") or 0})
     return {"comments": rows, "total": payload.get("count") or 0,
             "more": bool(rows and page < min(payload.get("maxPage") or 0, 500))}
+
+
+def radio_stations():
+    result = _read("/fm/class").get("data") or {}
+    stations = {}
+    for group in result.get("class_list") or []:
+        for row in group.get("fmlist") or []:
+            station_id = str(row.get("fmid") or "")
+            station_type = row.get("fmtype")
+            name = str(row.get("fmname") or "").strip()
+            if not _NUMBER.fullmatch(station_id) or type(station_type) is not int or not 0 < station_type <= 99 or not name:
+                continue
+            ident = f"{station_id}_{station_type}"
+            stations.setdefault(ident, {"id": ident, "name": name[:120], "category": str(group.get("classname") or "")[:120]})
+    return {"items": list(stations.values())}
+
+
+def _station_track(row):
+    name = str(row.get("name") or "")
+    artists, separator, title = name.partition(" - ")
+    return _song(row.get("hash"), row.get("album_audio_id"), title if separator else name,
+                 artists if separator else "", row.get("albumname"), row.get("cover"),
+                 row.get("time"), row.get("mvhash"))
+
+
+def radio(limit, offset, seeds, excluded, station=""):
+    if station:
+        station_id, station_type = station.split("_")
+        query = {"fmid": station_id, "type": station_type, "size": limit, "offset": offset, "userid": 0}
+        reply = next(iter(_read("/fm/songs", query).get("data") or []), {})
+        items = _kinds(reply.get("songs") or [], _station_track)
+        cursor = reply.get("offset")
+        next_offset = cursor if type(cursor) is int and offset < cursor <= 10000 and items else None
+    else:
+        # Use recent recordings as seeds on the initial batch. Subsequent pages widen the selection.
+        items = []
+        if offset == 0:
+            data = _read("/ai/recommend", {"album_audio_id": ",".join(seeds)}).get("data") or {}
+            items = _kinds(data.get("song_list") or [], _audio)
+        if len([row for row in items if row["id"] not in excluded]) < limit:
+            data = _read("/ai/recommend/song").get("data") or {}
+            items.extend(_kinds(data.get("list") or [], _audio))
+        next_offset = offset + 1 if offset < 10000 else None
+    unique = []
+    seen = set(excluded)
+    for item in items:
+        if item["id"] not in seen:
+            seen.add(item["id"])
+            unique.append(item)
+    return {"items": unique[:limit], "nextOffset": next_offset if unique else None}

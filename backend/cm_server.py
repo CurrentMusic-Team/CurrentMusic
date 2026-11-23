@@ -3027,7 +3027,7 @@ def route(handler, method):
             ("GET", "/music-service/connect", "公开", "由流声引擎侧发起外接音乐服务连接"),
             ("POST", "/music-service/v1/{operation}", "按能力", "调用白名单中的音乐能力。详见 /api-docs/reference/guide-music-service-api/"),
             ("GET", "/kugou/capabilities", "公开", "探测酷狗概念版曲库与播放能力。"),
-            ("POST", "/kugou/v1/{operation}", "按能力", "酷狗概念版曲库、发现、歌词、评论、取址和个人音乐库。每日推荐、播放与个人操作使用 CurrentMusic Bearer，写入传 confirm=true。"),
+            ("POST", "/kugou/v1/{operation}", "按能力", "酷狗概念版曲库、发现、歌词、评论、音频和 MV 取址、私人漫游和个人音乐库。每日推荐、播放与个人操作使用 CurrentMusic Bearer，写入传 confirm=true。"),
             ("GET", "/kugou/media/{ticket}", "播放票据", "短时有效的 HTTPS 媒体地址，支持 HEAD 和单段 Range。"),
             ("GET", "/audio-sources", "Bearer", "自研音源 v1 导入目录，返回音源名称和适用平台。详见 /api-docs/reference/guide-audio-sources-api/"),
             ("GET", "/audio-sources/currentmusic-engine/resolve", "Bearer", "已导入的流声引擎音源取链，接受 id、level、refresh、supportsDolby；网易云曲库。详见 /api-docs/reference/guide-audio-sources-api/"),

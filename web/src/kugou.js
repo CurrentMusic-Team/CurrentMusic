@@ -19,7 +19,7 @@ export function kugouQuality(value) {
 
 export async function kugouRequest(operation, body) {
   const base = settings.base, token = auth.token;
-  const needsAuth = /^(playback|library|history)\./.test(operation) || operation === 'discover.recommendations';
+  const needsAuth = /^(playback|library|history|roaming)\./.test(operation) || operation === 'discover.recommendations';
   const response = await call(operation === 'capabilities' ? 'GET' : 'POST',
     operation === 'capabilities' ? '/kugou/capabilities' : '/kugou/v1/' + operation,
     { base, body, auth: needsAuth, keepalive: operation === 'history.record', redirect: 'error' });
@@ -30,22 +30,28 @@ export async function kugouRequest(operation, body) {
 export function kugouSong(item) {
   if (!TRACK_ID.test(item?.id || '')) return null;
   return { ncm_id: 'kg:' + item.id, provider: 'kugou', kugou_id: item.id, name: item.name,
-    artists: item.artists, album: item.album, pic: item.artwork, duration: item.durationMs, lyricMatch: item.snippet };
+    artists: item.artists, album: item.album, pic: item.artwork, duration: item.durationMs, lyricMatch: item.snippet,
+    mv: /^[a-f0-9]{32}$/.test(item.videoId || '') ? item.videoId : '' };
 }
 
 export async function resolveKugouSong(song, level) {
   try {
     const quality = KUGOU_QUALITIES.some(item => item.key === level) ? level : kugouQuality();
     const result = await kugouRequest('playback.resolve', { id: song.kugou_id, quality });
-    const base = new URL(settings.base);
-    const url = new URL(result.url);
-    if (url.protocol !== 'https:' || url.origin !== base.origin || url.username || url.password ||
-        !url.pathname.startsWith(base.pathname.replace(/\/$/, '') + '/kugou/media/')) {
-      throw new Error('酷狗未返回有效的流声引擎播放地址');
-    }
-    return { url: url.href, provider: 'kugou', level: result.quality, type: result.format, br: result.bitrate };
+    return { url: kugouMediaUrl(result.url), provider: 'kugou', level: result.quality, type: result.format, br: result.bitrate };
   } catch (error) {
     error.noAutoNext = true;
     throw error;
   }
+}
+
+
+export function kugouMediaUrl(value) {
+  const base = new URL(settings.base);
+  const url = new URL(value);
+  if (url.protocol !== 'https:' || url.origin !== base.origin || url.username || url.password ||
+      !url.pathname.startsWith(base.pathname.replace(/\/$/, '') + '/kugou/media/')) {
+    throw new Error('酷狗未返回有效的流声引擎播放地址');
+  }
+  return url.href;
 }

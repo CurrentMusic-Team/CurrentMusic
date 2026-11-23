@@ -54,21 +54,25 @@ curl 'https://music.20110208.xyz/cm/music-service/v1/catalog.search' \
 
 | 能力 | 用法 |
 | --- | --- |
-| `catalog.search` | `query` 和 `kind`，支持 `song`、`album`、`artist`、`playlist`、`lyric`。歌词命中可带 `snippet` |
+| `catalog.search` | `query` 和 `kind`，支持 `song`、`album`、`artist`、`playlist`、`lyric`、`mv`。歌词命中可带 `snippet`，歌曲可包含 `videoId` |
 | `catalog.track/album/artist/playlist` | 原样传搜索或发现返回的 `id`，歌单详情也接受榜单 ID。容器详情返回 `tracks`、`albums` 和 `nextOffset`，可用的资源元数据包括 `description`、`trackCount` |
 | `discover.hot/suggest/charts/playlists` | 公开热搜、联想、榜单和推荐歌单 |
 | `discover.recommendations` | 使用独立曲库会话获取每日推荐歌曲，外接客户端需 `music.library.read` |
+| `catalog.video` | 以酷狗 MV 哈希作为 `id`，返回名称、歌手和原始视频 ID |
 | `track.lyrics` | 歌曲 `id`。返回逐字 KRC 时间轴，或返回逐行 LRC |
 | `track.comments` | 歌曲 `id`。支持 `sort: "hot"` 或 `"recommended"`，按 `page` 和 `limit` 分页 |
+| `playback.mv` | 以酷狗 MV 哈希作为 `id`。返回可用的完整 MP4 流媒体地址，需播放权限 |
 | `playback.qualities/resolve` | 歌曲 `id`。外接客户端需 `music.play`，并检查站内播放权限 |
 | `library.favorites/favorite.status/favorite.set` | 收藏列表包含 `items`、`total` 和 `nextOffset`。状态查询传 `ids` 数组（最多 100 首），返回 `selectedIds`。修改传歌曲 `id` 和布尔值 `selected` |
 | `library.playlists/playlist` | 个人歌单和详情。个人歌单 ID 形如 `kgp_123`，每首歌曲使用曲库返回的原始 `id` |
 | `library.playlist.create/edit/delete/tracks` | 新建可带 `description` 及 `trackIds`。改名可同时修改描述。修改曲目传歌单 `id`、`trackIds`（最多 50 首）、`selected` |
 | `history.recent/record` | 最近播放按每首歌最后一次播放倒序。记录首次传歌曲 `id`，后续传同一歌曲 `id`、返回的 `playId` 和累计 `elapsedMs` |
+| `roaming.songs` | 漫游歌曲。可选 `seedId` 为起始曲目，或使用 `station` 选择电台。可传 `limit`（最多 30 首）、`excludeIds`（最多 100 首）、`offset`。用返回的 `nextOffset` 获取下一批 |
+| `roaming.stations/skip` | 电台清单返回 `items`，每项含 `id`、`name` 和 `category`。隐藏曲目传歌曲 `id`，作用于该 CurrentMusic 账号的酷狗每日推荐和漫游 |
 
 歌曲 ID 由酷狗哈希和专辑音频 ID 组成。榜单与公开歌单使用各自的 ID。以接口返回的原始 ID 调用详情、歌词、评论与播放。
 
-Web 可在首页的「音乐平台」选择网易云音乐或酷狗概念版。选择按服务器和 CurrentMusic 账号保存在当前浏览器。酷狗版首页、搜索和对应详情通过 `POST /cm/kugou/v1/{operation}` 调用共享操作，JSON 请求体为 `input` 对象本身。每日推荐、播放、个人收藏、歌单和历史携带 CurrentMusic 登录会话 Bearer。Web 写入在请求体内附 `confirm: true`。`GET /cm/kugou/capabilities` 返回公开的 `catalog` 和 `playback` 开关状态。
+Web 可在首页的「音乐平台」选择网易云音乐或酷狗概念版。选择按服务器和 CurrentMusic 账号保存在当前浏览器。酷狗版首页、搜索和对应详情通过 `POST /cm/kugou/v1/{operation}` 调用共享操作，JSON 请求体为 `input` 对象本身。每日推荐、播放、个人收藏、歌单、历史和漫游携带 CurrentMusic 登录会话 Bearer。Web 写入在请求体内附 `confirm: true`。`GET /cm/kugou/capabilities` 返回公开的 `catalog` 和 `playback` 开关状态。
 
 收藏、个人歌单、播放历史按 CurrentMusic 账号保存，切换平台时在现有界面显示所选平台的音乐。外接客户端分别申请 `music.library.read`、`music.library.write`、`music.history.read` 和 `music.history.write`。酷狗概念版的服务端播放会话仅用于音频取址。
 
