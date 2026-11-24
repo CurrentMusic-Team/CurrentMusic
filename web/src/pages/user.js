@@ -480,7 +480,7 @@ async function renderProfile(el, autoDecor) {
     (kugou
       ? kugouAccountRequest().then(d => { kgAccount = d; })
       : api.bindStatus().then(d => { bind = d; })).catch(() => {}),
-    api.followedArtists().then(d => { follows = d.artists || []; followCount = d.count || follows.length; }).catch(() => {}),
+    ...(kugou ? [] : [api.followedArtists().then(d => { follows = d.artists || []; followCount = d.count || follows.length; }).catch(() => {})]),
     // 失败时标记 failed：不能把「没取到」当成「未解锁」，否则限流/断网会误报成还差多少小时
     api.decorations()
       .then(d => {

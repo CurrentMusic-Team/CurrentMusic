@@ -32,7 +32,9 @@ export async function render(el, params = {}) {
     if (!bind.bound) { needBind(el); return; }
   }
 
-  const tab = kugou ? 'fm' : params.tab || sessionStorage.getItem(KEY) || 'fm';
+  const tabKey = kugou ? KEY + '.kugou' : KEY;
+  const requested = params.tab || params.query?.tab || sessionStorage.getItem(tabKey) || 'fm';
+  const tab = kugou && requested !== 'find' ? 'fm' : requested;
   const TABS = [
     { k: 'fm', l: '私人 FM' },
     { k: 'podcast', l: '我的播客' },
@@ -41,12 +43,12 @@ export async function render(el, params = {}) {
   ];
   el.innerHTML = `
     <div class="cm-sqtabs" id="podTabs">
-      ${(kugou ? TABS.slice(0, 1) : TABS).map(t => `<button class="cm-sqtab${t.k === tab ? ' on' : ''}" data-k="${t.k}">${t.l}</button>`).join('')}
+      ${(kugou ? TABS.filter(item => ['fm', 'find'].includes(item.k)) : TABS).map(t => `<button class="cm-sqtab${t.k === tab ? ' on' : ''}" data-k="${t.k}">${t.l}</button>`).join('')}
     </div>
     <div id="podBody">${skelGrid(4)}</div>`;
   el.querySelectorAll('#podTabs .cm-sqtab').forEach(b => {
     b.onclick = () => {
-      sessionStorage.setItem(KEY, b.dataset.k);
+      sessionStorage.setItem(tabKey, b.dataset.k);
       render(el, { tab: b.dataset.k });
     };
   });
@@ -56,6 +58,11 @@ export async function render(el, params = {}) {
       ? '<div class="cm-empty">需先绑定网易云账号</div>'
       : `<div class="cm-empty">加载失败：${esc(e.message)}</div>`;
   };
+
+  if (kugou && tab === 'find') {
+    const { renderSpokenDiscovery } = await import('./kugou-podcast.js');
+    return renderSpokenDiscovery(body);
+  }
 
   if (tab === 'fm') {
     body.innerHTML = skelGrid(4);

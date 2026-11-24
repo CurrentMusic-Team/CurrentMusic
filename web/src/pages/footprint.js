@@ -9,7 +9,10 @@
 // 上游已知降级：/summary/annual 实测 404（该年度总结接口已下线）→ 页面给明确说明，
 // 年度维度改用 /listen/data/year/report（它返回逐年播放次数与时长）。
 import { api, auth } from '../api.js';
-import { esc, toast, fmtCount, fmtDur, skelList } from '../ui.js';
+import { esc, toast, fmtCount, fmtDur, skelList, renderSongList } from '../ui.js';
+import { kugouSongs, musicPlatform } from '../music-platform.js';
+import { kugouRequest } from '../kugou.js';
+import { player } from '../player.js';
 
 const KEY = 'cm.footKey';
 const TAB_KEY = 'cm.footTab';
@@ -48,6 +51,7 @@ function needBind(el, text = '听歌足迹与你的网易云账号绑定，请�
 }
 
 export async function render(el, params = {}) {
+  if (musicPlatform() === 'kugou') return renderKugouFootprint(el);
   if (!auth.token) {
     needBind(el, '登录后可查看你在网易云的听歌足迹与播放记录');
     return;
@@ -278,4 +282,29 @@ export async function render(el, params = {}) {
         ? `<div class="cm-al-desc">${esc(JSON.stringify(annualR.value.data || {}).slice(0, 400))}</div>`
         : '<div class="cm-empty small">该接口在上游已下线（实测 404「接口未找到」），年度维度请用上面的逐年听歌</div>'}
     </section>`;
+}
+
+
+async function renderKugouFootprint(el) {
+  if (!auth.token) {
+    el.innerHTML = '<div class="cm-login-tip page"><div>登录后可查看酷狗听歌足迹</div><mdui-button variant="filled" href="#/user">去登录</mdui-button></div>';
+    return;
+  }
+  el.innerHTML = skelList(6);
+  const loading = el.firstElementChild;
+  try {
+    const [stats, recent] = await Promise.all([kugouRequest('history.summary', {}), kugouRequest('history.recent', { limit: 40 })]);
+    if (!loading.isConnected || musicPlatform() !== 'kugou') return;
+    const cards = [[fmtMin(stats.totalMs), '累计时长'], [fmtMin(stats.weekMs), '近七天'],
+      [fmtCount(stats.todayTracks), '今日听歌'], [fmtCount(stats.totalTracks), '累计曲目']];
+    el.innerHTML = `<div class="cm-hscroll cm-stat-row">${cards.map(([value, label]) => `
+      <div class="cm-card cm-stat-card"><div class="cm-stat-num">${value}</div><div class="cm-stat-l">${label}</div></div>`).join('')}</div>
+      <section class="cm-sec"><div class="cm-sec-head"><h2>近七天听得最多</h2></div>
+        ${stats.rank.length ? `<div class="cm-stat-list">${stats.rank.map(item => `<div class="cm-lm-item"><div class="cm-lm-lyric">${esc(item.name)}</div>
+        <div class="cm-lm-meta"><span>${esc(item.artists)}</span><span>${fmtCount(item.plays)} 次</span></div></div>`).join('')}</div>`
+        : '<div class="cm-empty small">暂无近七天记录</div>'}</section>
+      <section class="cm-sec"><div class="cm-sec-head"><h2>最近播放</h2></div><div id="kgRecent"></div></section>`;
+    const songs = kugouSongs(recent.items);
+    await renderSongList(el.querySelector('#kgRecent'), songs, { onPlay: i => player.playList(songs, i), deferStatus: true });
+  } catch (error) { if (loading.isConnected) el.textContent = error.message; }
 }

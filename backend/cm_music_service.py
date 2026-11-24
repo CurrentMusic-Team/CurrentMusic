@@ -446,6 +446,8 @@ BOTH = ("netease", "qqmusic")
 OPERATIONS = {
     "catalog.search": Operation("搜索", search, providers=(*BOTH, "kugou")),
     "catalog.track": Operation("歌曲详情", details("song"), providers=(*BOTH, "kugou")),
+    "catalog.podcast": Operation("有声节目详情", None, providers=("kugou",)),
+    "discover.podcasts": Operation("发现有声节目", None, providers=("kugou",)),
     "catalog.video": Operation("MV 详情", None, providers=("kugou",)),
     "catalog.album": Operation("专辑", details("album"), providers=(*BOTH, "kugou")),
     "catalog.artist": Operation("歌手", details("artist"), providers=(*BOTH, "kugou")),
@@ -477,6 +479,7 @@ OPERATIONS = {
     "library.playlist.delete": Operation("删除歌单", playlist_delete, "music.library.write", providers=("netease", "kugou"), write=True),
     "library.playlist.tracks": Operation("修改歌单曲目", playlist_tracks, "music.library.write", providers=("netease", "kugou"), write=True),
     "library.cloud": Operation("云盘曲库", cloud, "music.cloud.read", providers=("netease", "kugou"), media="cloud"),
+    "history.summary": Operation("听歌足迹", None, "music.history.read", providers=("kugou",)),
     "history.recent": Operation("最近播放", recent, "music.history.read", providers=("netease", "kugou")),
     "history.record": Operation("记录播放进度", history_record, "music.history.write", providers=("netease", "kugou"), write=True),
     "roaming.songs": Operation("私人漫游", roaming_songs, "music.library.read", providers=("netease", "kugou")),
@@ -541,6 +544,8 @@ def _kugou_personal(operation, data, uid):
         return library.playlist_delete(uid, reference(data))
     if operation == "library.playlist.tracks":
         return library.playlist_tracks(uid, reference(data), _kugou_track_ids(data, "trackIds"), _kugou_selected(data))
+    if operation == "history.summary":
+        return library.summary(uid, integer(data, "limit", 1, 30, 10))
     if operation == "history.recent":
         return library.recent(uid, *paging(data))
     if operation == "history.record":
@@ -622,6 +627,10 @@ def kugou_operation(operation, data, uid, origin):
         return cm_kugou_catalog.new_songs(integer(data, "limit", 1, 30, 12))
     if operation == "discover.artists":
         return cm_kugou_catalog.artist_directory(string(data, "group", 20), *paging(data))
+    if operation == "discover.podcasts":
+        return cm_kugou_catalog.spoken_shows(integer(data, "limit", 1, 30, 20))
+    if operation == "catalog.podcast":
+        return cm_kugou_catalog.spoken_show(reference(data), *paging(data))
     if operation == "track.insights":
         return cm_kugou_catalog.track_insights(_kugou_track_id(data))
     if operation == "roaming.stations":

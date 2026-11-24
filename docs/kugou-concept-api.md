@@ -22,6 +22,7 @@ curl 'https://music.20110208.xyz/cm/music-service/v1/catalog.search' \
 | `catalog.track/album/artist/playlist` | 原样传搜索或发现返回的 `id`，歌单详情也接受榜单 ID。容器详情返回 `tracks`、`albums` 和 `nextOffset`，可用的资源元数据包括 `description`、`trackCount` |
 | `discover.hot/suggest/charts/playlists` | 公开热搜、联想、榜单和推荐歌单 |
 | `discover.playlist.categories`、`discover.playlist.directory`、`discover.artists` | 歌单分类、歌单广场和歌手目录。传 `category` 或 `group` 进行筛选 |
+| `discover.podcasts`、`catalog.podcast` | 发现酷狗有声节目和读取节目专辑。详情返回 `resource`、单集 `tracks` 和 `nextOffset`，单集使用标准酷狗曲目 ID |
 | `discover.new.songs`、`track.insights` | 推荐新歌和歌曲资料。资料所列音质为文件档位 |
 | `discover.recommendations` | 使用独立曲库会话获取每日推荐歌曲，外接客户端需 `music.library.read` |
 | `catalog.video` | 以酷狗 MV 哈希作为 `id`，返回名称、歌手和原始视频 ID |
@@ -34,6 +35,7 @@ curl 'https://music.20110208.xyz/cm/music-service/v1/catalog.search' \
 | `library.cloud` | 查看已绑定酷狗账号的云盘，需 `music.cloud.read`。返回 `items`、`nextOffset`、总数和容量字段。文件 ID 形如 `kgc_123`，匹配曲库的条目可能含 `catalogId` |
 | `library.playlists/playlist` | 个人歌单和详情。个人歌单 ID 形如 `kgp_123`，每首歌曲使用曲库返回的原始 `id` |
 | `library.playlist.create/edit/delete/tracks` | 新建可带 `description` 及 `trackIds`。改名可同时修改描述。修改曲目传歌单 `id`、`trackIds`（最多 50 首）、`selected` |
+| `history.summary` | 返回 CurrentMusic 内的累计听歌时长、近七天时长、今日曲目数和近七天播放榜。旧记录缺少日期时计入累计统计 |
 | `history.recent/record` | 最近播放按每首歌最后一次播放倒序。记录首次传歌曲 `id`，后续传同一歌曲 `id`、返回的 `playId` 和累计 `elapsedMs` |
 | `roaming.songs` | 漫游歌曲。可选 `seedId` 为起始曲目，或使用 `station` 选择电台。可传 `limit`（最多 30 首）、`excludeIds`（最多 100 首）、`offset`。用返回的 `nextOffset` 获取下一批 |
 | `roaming.stations/skip` | 电台清单返回 `items`，每项含 `id`、`name` 和 `category`。隐藏曲目传歌曲 `id`，作用于该 CurrentMusic 账号的酷狗每日推荐和漫游 |
@@ -66,6 +68,18 @@ Web 与 X 通过 CurrentMusic 账号同步流声聚合歌单。已绑定用户�
 ## 接口清单
 
 <!-- music-service-operations -->
+
+## Web 功能对照
+
+| 功能 | 酷狗概念版现状 |
+| --- | --- |
+| 曲库与播放 | 支持搜索、详情、榜单、歌单广场、歌手分类、播放音质、逐字歌词和已发布 MV 播放 |
+| 我的曲库 | 聚合歌单与收藏可编辑。已绑定账号可读取酷狗 App 歌单，原生写入由服务端开关控制 |
+| 听歌足迹和有声节目 | 可查看流声内记录和近七天播放榜，可浏览酷狗有声节目并播放取得授权的单集 |
+| 云盘与评论 | 支持本人云盘列表和歌曲评论读写。云盘上传、匹配、删除、私有文件取址及评论楼层互动待验证 |
+| 漫游与发现 | 支持私人 FM、种子漫游和推荐筛选。播客收藏、广播目录、新碟和 MV 广场待验证 |
+| 设备与下载 | 独立下载、投屏和一起听需完成媒体权限与设备测试 |
+| 账号专题 | 网易云的会员任务、消息、动态、歌词本、音乐资产及运营功能有各自的平台要求 |
 
 ## 服务方配置
 

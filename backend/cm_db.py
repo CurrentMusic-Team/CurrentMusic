@@ -729,6 +729,8 @@ def init():
     if pccols and "reply_to" not in pccols:
         conn.execute("ALTER TABLE post_comments ADD COLUMN reply_to INTEGER NOT NULL DEFAULT 0")
     conn.commit()
+    cm_kugou_library.migrate(conn)
+    conn.commit()
     import cm_aggregate
     cm_aggregate.migrate(conn)
     conn.close()

@@ -103,6 +103,25 @@ class AggregateLibraryTests(unittest.TestCase):
                                   {'tracks': [ncm, kg]})[1]['selected'], [ncm, kg])
         self.assertEqual(cm_kugou_library.favorite_status(uid, [ID])['selectedIds'], [ID])
 
+    def test_listening_summary_counts_played_time_and_omits_unknown_dates_from_week(self):
+        uid, token = self.user('footprint-owner')
+        _, outsider = self.user('footprint-outsider')
+        metadata = cm_kugou._track(ID, 'Fixture KuGou', '', '', '', 100_000)
+        with patch.object(cm_kugou, 'tracks', return_value=[metadata]):
+            old = cm_kugou_library.record(uid, ID, None, 0)
+            new = cm_kugou_library.record(uid, ID, None, 0)
+            cm_kugou_library.record(uid, ID, None, 0)
+        cm_kugou_library.record(uid, ID, int(old['playId']), 50_000)
+        cm_kugou_library.record(uid, ID, int(new['playId']), 70_000)
+        with cm_aggregate.transaction(write=True) as conn:
+            conn.execute('UPDATE kugou_plays SET started_at=0 WHERE id=?', (old['playId'],))
+        with patch.object(cm_kugou, 'base', return_value='http://127.0.0.1:3201'):
+            status, data, _ = self.call('POST', '/kugou/v1/history.summary', {}, token)
+            foreign = self.call('POST', '/kugou/v1/history.summary', {}, outsider)[1]
+        self.assertEqual((status, data['totalMs'], data['weekMs'], data['todayTracks'], data['plays']), (200, 120_000, 70_000, 1, 2))
+        self.assertEqual(data['rank'][0]['id'], ID)
+        self.assertEqual(foreign['totalMs'], 0)
+
     def test_preferences_and_verified_native_read_use_personal_session(self):
         uid, token = self.user('native-user')
         self.assertEqual(self.api('GET', 'preferences', token)[1]['providers']['kugou']['source'], 'aggregate')

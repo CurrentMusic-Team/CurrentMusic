@@ -22,6 +22,7 @@ import { initPullToRefresh } from './ptr.js';
 import { engineChrome, engineOutdated } from './version.js';
 import { player } from './player.js';
 import { initPlayerUI } from './player-ui.js';
+import { musicPlatform } from './music-platform.js';
 import { closeMv, initMv } from './mv.js';
 import { initCast } from './cast.js';
 import { bootUiPreset } from './uipreset.js';
@@ -56,6 +57,7 @@ import * as home from './pages/home.js';
 import * as levels from './pages/levels.js';
 import * as search from './pages/search.js';
 import * as kugouMusic from './pages/kugou.js';
+import * as kugouPodcast from './pages/kugou-podcast.js';
 import * as libraryPlaylist from './pages/library-playlist.js';
 import * as library from './pages/library.js';
 import * as playlist from './pages/playlist.js';
@@ -114,6 +116,7 @@ const ROUTES = [
     fixed: m => ['kugou-' + m[1], m[2]] },
   { re: /^#\/kugou\/me\/favorites$/, page: playlist, title: '我喜欢的音乐', fixed: ['kugou-favorites'] },
   { re: /^#\/kugou\/me\/playlist\/(kgp_[1-9][0-9]{0,18})$/, page: libraryPlaylist, title: '我的歌单', fixed: m => ['alias', m[1]] },
+  { re: /^#\/kugou\/podcast\/([1-9][0-9]*)$/, page: kugouPodcast, title: '有声节目' },
   { re: /^#\/kugou\/charts$/, page: playlist, title: '排行榜', fixed: ['kugou-charts'] },
   { re: /^#\/square$/, page: squarePage, title: '发现' },
   { re: /^#\/u\/(\d+)$/, page: profilePage, title: '用户主页', fixed: m => [m[1]] },
@@ -193,6 +196,12 @@ window.addEventListener('hashchange', () => {
   }
 });
 
+const NETEASE_ONLY_PAGES = new Set([
+  '#/assets', '#/lyricmarks', '#/followed', '#/follow', '#/messages', '#/events', '#/member',
+  '#/services', '#/rep', '#/ugc', '#/albums', '#/mvlist', '#/videohome',
+]);
+const KUGOU_PAGE_LINKS = new Map([['#/account', '#/user'], ['#/radio', '#/podcast?tab=fm']]);
+
 async function router({ refresh = false } = {}) {
   const hash = location.hash || '#/home';
   if (needsWelcome() && !/^#\/(welcome|two-factor|security-question|legal)(?:[/?]|$)/.test(hash)) { location.hash = '#/welcome'; return; }
@@ -201,6 +210,11 @@ async function router({ refresh = false } = {}) {
   // 查询参数解析成 params.query 交给页面（不解析的话 ?xxx 会让所有路由都匹配不上）
   const qIdx = hash.indexOf('?');
   const routePath = qIdx < 0 ? hash : hash.slice(0, qIdx);
+  const kugouMode = musicPlatform() === 'kugou';
+  if (kugouMode && KUGOU_PAGE_LINKS.has(routePath)) {
+    location.replace(KUGOU_PAGE_LINKS.get(routePath));
+    return;
+  }
   const query = {};
   if (qIdx >= 0) {
     hash.slice(qIdx + 1).split('&').forEach(kv => {
@@ -247,7 +261,13 @@ async function router({ refresh = false } = {}) {
     const footer = window.NativeApi?.versionCode ? null : document.getElementById('engineCredit').content.firstElementChild;
     showPage = createPageMotion(out(), footer);
   }
-  await showPage(wrap => matched.page.render(wrap, params), navDirection === 'back', { refresh });
+  await showPage(wrap => {
+    if (kugouMode && NETEASE_ONLY_PAGES.has(routePath)) {
+      wrap.innerHTML = '<div class="cm-empty">酷狗概念版暂未开放此功能。<a href="#/home">返回首页</a></div>';
+      return;
+    }
+    return matched.page.render(wrap, params);
+  }, navDirection === 'back', { refresh });
 }
 
 function boot() {
