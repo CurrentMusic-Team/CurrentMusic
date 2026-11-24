@@ -122,7 +122,7 @@ class DocumentationTests(unittest.TestCase):
             self.assertTrue((output/'licenses/docsify-MIT.txt').is_file())
             self.assertTrue((output/'guide-song-insights-api.md').is_file())
             self.assertIn('超时归档与恢复', (output/'guide-rooms-design.md').read_text())
-            self.assertEqual(sum(item['group']=='一起听房间' for item in manifest), 30)
+            self.assertEqual(sum(item['group']=='一起听房间' for item in manifest), 31)
 
 
 if __name__=='__main__':unittest.main()

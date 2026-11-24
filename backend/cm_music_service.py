@@ -464,6 +464,7 @@ OPERATIONS = {
     "track.insights": Operation("歌曲与音质资料", None, providers=("kugou",)),
     "track.lyrics": Operation("歌词", lyrics, providers=(*BOTH, "kugou"), media="lyrics"),
     "track.comments": Operation("歌曲评论", comments, providers=("netease", "kugou")),
+    "track.comment.replies": Operation("歌曲评论楼层", None, providers=("kugou",)),
     "track.comment.add": Operation("发表评论", comment_add, "music.comment.write", providers=("netease", "kugou"), write=True),
     "playback.qualities": Operation("音质档位", qualities, "music.play", providers=("netease", "kugou"), media="playback"),
     "playback.resolve": Operation("播放取址", play, "music.play", providers=("netease", "kugou"), media="playback"),
@@ -660,6 +661,11 @@ def kugou_operation(operation, data, uid, origin):
         return cm_kugou_catalog.details(operation.removeprefix("catalog."), ident, *paging(data))
     if operation == "track.lyrics":
         return cm_kugou_catalog.lyrics(ident)
+    if operation == "track.comment.replies":
+        return cm_kugou_catalog.comment_replies(
+            ident, string(data, 'commentId', 20), string(data, 'replyThread', 80),
+            integer(data, 'page', 1, 500, 1), integer(data, 'limit', 1, 50, 20),
+        )
     if operation == "track.comments":
         sort = string(data, "sort", 12, default="hot")
         if sort not in ("hot", "recommended") or string(data, "cursor", 120):

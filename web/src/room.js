@@ -32,6 +32,7 @@ export const roomApi = {
   reject: (id, qid) => R('POST', `/rooms/${id}/queue/${qid}/reject`)({}),
   removeItem: (id, qid) => call('DELETE', `/rooms/${id}/queue/${qid}`, { body: {}, auth: true }),
   renewStream: (id) => R('POST', `/rooms/${id}/stream/renew`)({}),
+  memberStream: (id, trackRevision) => R('POST', `/rooms/${id}/stream/member`)({ trackRevision }),
   syncTime: (id) => R('POST', `/rooms/${id}/sync`)({}),
   heartbeat: (id) => R('POST', `/rooms/${id}/heartbeat`)({}),
 };

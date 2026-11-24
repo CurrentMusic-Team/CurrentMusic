@@ -42,8 +42,8 @@
 
 | 方法 | 路径 | 权限与参数 |
 | --- | --- | --- |
-| GET | `/rooms/{id}/queue` | 成员。返回 `{queue}`，普通成员仅能看到自己提交的待审条目。 |
-| POST | `/rooms/{id}/queue` | 成员。传 `{meta:{ncm_id,name,artists?,pic?,duration?}}`，返回 `{item,auto}`。自由模式、关闭审批或控播角色提交时直接入队。 |
+| GET | `/rooms/{id}/queue` | 成员。返回 `{queue}`，普通成员仅能看到自己提交的待审条目。酷狗条目附带 `trackRef`。 |
+| POST | `/rooms/{id}/queue` | 成员。网易云可传 `{meta:{ncm_id,name,artists?,pic?,duration?}}`。酷狗传 `{meta:{trackRef:{provider:"kugou",id}}}`。返回 `{item,auto}`。自由模式、关闭审批或控播角色提交时直接入队。 |
 | POST | `/rooms/{id}/queue/{qid}/approve` | 房主或房间管理员。采纳待审条目并追加到待播队列。 |
 | POST | `/rooms/{id}/queue/{qid}/reject` | 房主或房间管理员。驳回待审条目。 |
 | DELETE | `/rooms/{id}/queue/{qid}` | 提交者、房主或房间管理员。删除条目，正在播放的条目需先切换。 |
@@ -54,8 +54,11 @@
 | POST | `/rooms/{id}/next` | 房主或房间管理员。播放队首歌曲，无待播歌曲时暂停。 |
 | POST | `/rooms/{id}/prev` | 房主或房间管理员。播放最近一首历史曲目，当前曲目回到队首。 |
 | POST | `/rooms/{id}/stream/renew` | 成员。音源缺失或剩余有效期不超过 60 秒时可续签，进度和播放状态保持。 |
+| POST | `/rooms/{id}/stream/member` | 当前房间成员。使用 CurrentMusic Bearer，并传 `{trackRevision}` 领取当前酷狗曲目的个人短时地址。 |
 
 歌曲时长与播放位置使用毫秒。播放和续签接口返回 `{timeline, seq}`。`next` 和 `prev` 可传当前 `{trackRevision}`，并发切歌时服务端会拒绝过期操作。解析音源失败时返回 `502`，保留队列和当前时间轴。Web 在歌曲结束时由在线房主或房间管理员触发下一首。历史保留最近 50 首，待审和待播条目合计最多 200 条。
+
+酷狗曲目用 `trackRef.provider` 和 `trackRef.id` 识别。其时间轴保留 `trackNcmId: 0`，并用 `stream.memberTicket: true` 指示需要领取个人地址。详情、实时事件和续签响应中该曲目的 `stream.url` 为空。成员领取后得到 `{stream:{url,level,expireAt},trackRevision}`。地址支持 `GET`、`HEAD` 和单段 `Range`。离开房间、被移除、房间归档或曲目版本变化后，旧地址会拒绝后续请求。网易云时间轴继续直接提供 `stream.url`。
 
 ## 实时连接与重同步
 

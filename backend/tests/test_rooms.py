@@ -14,6 +14,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import cm_db
+import cm_kugou
 import cm_rooms
 import cm_server
 
@@ -193,6 +194,58 @@ class RoomTests(unittest.TestCase):
             self.assertEqual(renewed["basePosition"], 500)
             self.assertFalse(renewed["playing"])
 
+    def test_kugou_member_media_is_private_and_revoked_on_leave_or_switch(self):
+        room = self.create(freeMode=True)
+        path = f"/rooms/{room['id']}"
+        self.request('POST', path + '/join', 'member')
+        ident = 'a' * 32 + '-123'
+        ref = {'provider': 'kugou', 'id': ident}
+        headers = {'Host': 'room.example.test', 'X-Forwarded-Proto': 'https'}
+        source = 'https://webfs.tx.kugou.com/fixture.mp3'
+        metadata = cm_kugou._track(ident, 'Verified KuGou', 'Artist', '', '', 75_000)
+
+        def resolve(record, quality, user_id, origin, *, room_template=False):
+            self.assertEqual(record, ident)
+            self.assertTrue(room_template)
+            key = cm_kugou._issue(source, user_id, 'audio/mpeg', 600, room_template=True)
+            return {'url': 'kugou:' + key, 'quality': 'standard', 'expiresIn': 600}
+
+        with (patch.object(cm_kugou, 'track', return_value=(metadata, {}, {})),
+              patch.object(cm_kugou, 'resolve', side_effect=resolve) as resolver,
+              patch.object(cm_kugou, 'playback_enabled', return_value=True),
+              patch.object(cm_server, '_resolve_room_stream', return_value={
+                'stream_url': 'https://music.126.net/fixture.mp3', 'stream_level': 'standard',
+                'stream_expire_at': cm_rooms.now_ms() + 600_000})):
+            queued = self.request('POST', path + '/queue', 'member', {'meta': {'trackRef': ref}})['item']
+            self.assertEqual((queued['trackRef'], queued['name']), (ref, 'Verified KuGou'))
+            self.request('POST', path + '/queue', body={'meta': {'ncm_id': 42, 'name': 'Legacy NetEase'}})
+            result = self.request('POST', path + '/next', body={}, headers=headers)['timeline']
+            revision = result['trackRevision']
+            self.assertEqual((result['trackRef'], result['trackNcmId'], result['stream']['url']), (ref, 0, ''))
+            self.assertTrue(result['stream']['memberTicket'])
+            args = {'trackRevision': revision}
+            self.request('POST', path + '/stream/member', 'guest', args, status=403, headers=headers)
+            self.request('POST', path + '/stream/member', None, args, status=401, headers=headers)
+            self.request('POST', path + '/stream/member', 'member', {'trackRevision': revision - 1}, status=409, headers=headers)
+            owner = self.request('POST', path + '/stream/member', 'owner', args, headers=headers)['stream']['url']
+            member = self.request('POST', path + '/stream/member', 'member', args, headers=headers)['stream']['url']
+            self.assertNotEqual(member, owner)
+            self.assertEqual(member, self.request('POST', path + '/stream/member', 'member', args, headers=headers)['stream']['url'])
+            resolver.assert_called_once()
+            events = self.request('GET', path + '/events', 'member')['events']
+            self.assertNotIn('/cm/kugou/media/', json.dumps(events))
+            with cm_rooms.transaction() as conn:
+                template = cm_rooms.room_by_ident(conn, str(room['id']))['stream_url'].split(':')[1]
+            self.request('GET', '/kugou/media/' + template, None, status=404)
+            self.request('POST', path + '/leave', 'member')
+            self.request('GET', member.split('/cm')[1], None, status=403)
+            self.request('POST', path + '/join', 'member')
+            self.request('GET', member.split('/cm')[1], None, status=403)
+            result = self.request('POST', path + '/next', body=args)['timeline']
+            self.assertEqual(result['trackNcmId'], 42)
+            self.assertEqual(result['stream']['url'], 'https://music.126.net/fixture.mp3')
+            self.request('GET', owner.split('/cm')[1], None, status=403)
+
     def test_legacy_room_migration_preserves_cursor_and_scrubs_settings(self):
         room = self.create()
         rid = room["id"]
@@ -200,6 +253,9 @@ class RoomTests(unittest.TestCase):
             conn.execute("ALTER TABLE rooms DROP COLUMN archive_reason")
             conn.execute("ALTER TABLE rooms DROP COLUMN track_revision")
             conn.execute("ALTER TABLE room_queue DROP COLUMN play_order")
+            conn.execute("DROP TRIGGER room_members_media_epoch")
+            conn.execute("ALTER TABLE room_members DROP COLUMN media_epoch")
+            conn.execute("ALTER TABLE room_queue DROP COLUMN kugou_id")
             conn.execute("UPDATE room_members SET role='member' WHERE room_id=?", (rid,))
             conn.execute("""INSERT INTO room_events VALUES(?,20,'settings','{"password":"legacy-fixture"}',0)""", (rid,))
             conn.execute("UPDATE rooms SET closed_at=1000,playing=1 WHERE id=?", (rid,))

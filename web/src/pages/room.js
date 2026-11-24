@@ -4,6 +4,9 @@ import { api, auth } from '../api.js';
 import { esc, toast, fmtDur, renderSongList, avatarHTML, userTags, skelRoom, confirmDialog } from '../ui.js';
 import { roomApi, openEventStream, estimateClockOffset, RoomSync } from '../room.js';
 import { player } from '../player.js';
+import { kugouMediaUrl, kugouRequest } from '../kugou.js';
+import { kugouSongs, musicPlatform } from '../music-platform.js';
+import { trackRef } from '../library-v2.js';
 
 let cleanup = null;
 
@@ -213,12 +216,18 @@ export async function render(el, [roomId] = []) {
       progress.setAttribute('aria-valuetext', formatted);
       get('rCur').textContent = formatted;
     }
+    let sharedTimeline = null;
+    let personalMedia = null;
+    let pendingTicket = null;
+    let ticketFailure = '';
+    let retryTicketAfter = 0;
     const sync = new RoomSync(audio, ({ drift, position, duration }) => {
       const label = get('rSync');
       const playing = sync.timeline?.playing;
       const aligned = Math.abs(drift) < 300;
       let status = '正在连接…';
       if (connected) status = playing ? (aligned ? '已同步' : '正在校准') : '已连接';
+      if (sharedTimeline?.stream?.memberTicket && !sync.source && playing) status = ticketFailure || '正在准备房间音源…';
       if (label.textContent !== status) label.textContent = status;
       label.classList.toggle('ok', connected && (!playing || aligned));
       progressDuration = duration;
@@ -253,7 +262,7 @@ export async function render(el, [roomId] = []) {
       timelineSeq = seq;
       const meta = tl.trackMeta || {};
       get('rTrackName').textContent = meta.name || '还没有开始播放';
-      get('rTrackArtist').textContent = meta.artists || (!tl.trackNcmId ? '点一首歌，开启一起听' : '');
+      get('rTrackArtist').textContent = meta.artists || (!(tl.trackNcmId || tl.trackRef) ? '点一首歌，开启一起听' : '');
       const pic = meta.pic || '';
       if ((cover.dataset.pic || '') !== pic) {
         cover.dataset.pic = pic;
@@ -266,7 +275,48 @@ export async function render(el, [roomId] = []) {
       play.setAttribute('icon', tl.playing ? 'pause--outlined' : 'play_arrow--outlined');
       play.setAttribute('aria-label', label);
       play.title = label;
-      sync.applyTimeline(tl);
+      if (sharedTimeline?.trackRevision !== tl.trackRevision) {
+        personalMedia = null;
+        retryTicketAfter = 0;
+        ticketFailure = '';
+      }
+      sharedTimeline = tl;
+      applyRoomAudio();
+      if (tl.playing && tl.stream?.memberTicket) obtainTicket();
+    }
+
+    function applyRoomAudio() {
+      if (!sharedTimeline) return;
+      const mine = personalMedia?.trackRevision === sharedTimeline.trackRevision ? personalMedia.stream : null;
+      sync.applyTimeline(mine ? { ...sharedTimeline, stream: mine } : sharedTimeline);
+    }
+
+    async function obtainTicket() {
+      const tl = sharedTimeline;
+      if (!active || !tl?.stream?.memberTicket || retryTicketAfter > Date.now()) return;
+      const revision = tl.trackRevision;
+      if (personalMedia?.trackRevision === revision && personalMedia.stream.expireAt > Date.now() + sync.offset + 60_000) return;
+      if (pendingTicket?.revision === revision) return pendingTicket.request;
+      const marker = { revision };
+      pendingTicket = marker;
+      marker.request = (async () => {
+        try {
+          const result = await roomApi.memberStream(roomId, revision);
+          if (!active || sharedTimeline?.trackRevision !== revision || auth.token !== sessionToken || pendingTicket !== marker) return;
+          if (result.trackRevision !== revision) return;
+          result.stream.url = kugouMediaUrl(result.stream.url);
+          ticketFailure = '';
+          personalMedia = result;
+          applyRoomAudio();
+        } catch (error) {
+          if (!active || sharedTimeline?.trackRevision !== revision || pendingTicket !== marker) return;
+          if (error.status === 401) return fail(error);
+          if (error.status === 409) return refresh();
+          ticketFailure = error.message;
+          retryTicketAfter = Date.now() + 5000;
+        } finally { if (pendingTicket === marker) pendingTicket = null; }
+      })();
+      return marker.request;
     }
 
     function showDetails(d) {
@@ -328,7 +378,8 @@ export async function render(el, [roomId] = []) {
     }
 
     async function renew() {
-      const tl = sync.timeline;
+      const tl = sharedTimeline;
+      if (tl?.stream?.memberTicket) return obtainTicket();
       if (!tl?.trackNcmId || renewing) return;
       if (tl.stream && tl.stream.expireAt > Date.now() + sync.offset + 60_000) return;
       renewing = true;
@@ -404,6 +455,13 @@ export async function render(el, [roomId] = []) {
       }
     }
     audio.addEventListener('ended', advance);
+    audio.addEventListener('error', () => {
+      if (!active || !sharedTimeline?.stream?.memberTicket) return;
+      personalMedia = null;
+      ticketFailure = '房间音源暂不可用，稍后自动重试';
+      retryTicketAfter = Date.now() + 5000;
+      applyRoomAudio();
+    });
 
     showDetails(detail);
     sync.start();
@@ -570,12 +628,16 @@ function songPicker(roomId, onDone) {
   const diag = mdui.dialog({
     headline: '搜索点歌',
     body: `<div>
+      <label>音乐平台 <select id="pkPlatform"><option value="netease">网易云音乐</option><option value="kugou">酷狗概念版</option></select></label>
       <mdui-text-field id="pkKw" label="搜索歌曲 / 歌手" variant="outlined" style="width:100%"></mdui-text-field>
       <div id="pkRes" style="max-height:52vh;overflow-y:auto;margin-top:10px"><div class="cm-empty small">输入关键词开始搜索</div></div>
     </div>`,
     actions: [{ text: '关闭' }],
   });
   const input = diag.querySelector('#pkKw');
+  const platform = diag.querySelector('#pkPlatform');
+  platform.value = musicPlatform();
+  platform.onchange = () => input.dispatchEvent(new Event('input'));
   const box = diag.querySelector('#pkRes');
   let timer;
   let generation = 0;
@@ -588,9 +650,10 @@ function songPicker(roomId, onDone) {
     timer = setTimeout(async () => {
       box.innerHTML = '<div class="cm-loading small"><mdui-circular-progress></mdui-circular-progress></div>';
       try {
-        const d = await api.search(kw, 0, 20, 'song');
+        const songs = platform.value === 'kugou'
+          ? kugouSongs((await kugouRequest('catalog.search', { query: kw.slice(0, 60), kind: 'song', limit: 20 })).items)
+          : (await api.search(kw, 0, 20, 'song')).songs || [];
         if (run !== generation || !diag.open) return;
-        const songs = d.songs || [];
         if (!songs.length) { box.innerHTML = '<div class="cm-empty small">没有找到结果</div>'; return; }
         await renderSongList(box, songs, { deferStatus: true, onPlay: async (index) => {
           if (submitting || !diag.open || run !== generation) return;
@@ -598,7 +661,7 @@ function songPicker(roomId, onDone) {
           submitting = true;
           try {
             const r = await roomApi.queueAdd(roomId, {
-              ncm_id: song.ncm_id, name: song.name, artists: song.artists, pic: song.pic, duration: song.duration,
+              trackRef: trackRef(song), name: song.name, artists: song.artists, pic: song.pic, duration: song.duration,
             });
             toast(r.auto ? '已加入队列' : '已提交审批');
             diag.open = false;

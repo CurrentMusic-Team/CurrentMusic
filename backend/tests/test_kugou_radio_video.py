@@ -39,6 +39,23 @@ class KugouRadioAndVideoTests(unittest.TestCase):
             radio.assert_called_with(20, 0, [], set(), "")
             self.assertEqual(self.operation("roaming.songs", {"station": "12_bad"}, bearer, provider="kugou")[0], 400)
 
+    def test_comment_threads_use_the_returned_upstream_child_identifier(self):
+        root = {'id': 12345, 'content': 'Root', 'special_id': 3011, 'special_child_id': 'child_7', 'reply_num': 3}
+        reply = {'id': 98765, 'content': 'Reply', 'addtime': '2026-11-20 10:00:00'}
+        with (patch.dict(os.environ, CONFIG), patch.object(kg, 'track'),
+              patch.object(catalog, '_read', side_effect=[
+                  {'list': [root], 'count': 1, 'maxPage': 1},
+                  {'list': [reply], 'tid': 12345, 'childrenid': 'child_7', 'err_code': 0, 'comments_num': 3},
+                  {'list': [reply], 'tid': 12345, 'childrenid': 'other', 'err_code': 0},
+              ]) as upstream):
+            status, comments = self.operation('track.comments', {'id': ID}, provider='kugou')
+            self.assertEqual((status, comments['comments'][0]['replyThread']), (200, 'child_7'))
+            request = {'id': ID, 'commentId': '12345', 'replyThread': 'child_7', 'page': 2, 'limit': 1}
+            status, data = self.operation('track.comment.replies', request, provider='kugou')
+            self.assertEqual((status, data['comments'][0]['id'], data['more']), (200, '98765', True))
+            upstream.assert_called_with('/comment/floor', {'mixsongid': '123', 'tid': '12345', 'special_id': 'child_7', 'page': 2, 'pagesize': 1})
+            self.assertEqual(self.operation('track.comment.replies', request, provider='kugou')[0], 502)
+
     def test_video_gated_by_playback_permission(self):
         _, bearer = self.account("openid music.play")
         with patch.dict(os.environ, CONFIG), patch.object(kg, "resolve_video", return_value={"format": "mp4"}):

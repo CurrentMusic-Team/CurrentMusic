@@ -298,26 +298,58 @@ def lyrics(ident):
 
 
 
-def comments(ident, page, limit):
-    kg.track(ident)
-    _, mix_id = ident.split("-")
-    payload = _read("/comment/music", {"mixsongid": mix_id, "page": page, "pagesize": limit})
+_COMMENT_ID = re.compile(r'[1-9][0-9]{0,19}')
+_REPLY_THREAD = re.compile(r'[A-Za-z0-9_-]{1,80}')
+
+
+def _comment_rows(values, with_thread=False):
     rows = []
-    for row in payload.get("list") or []:
+    for row in values:
+        if not isinstance(row, dict):
+            continue
         try:
-            date = datetime.fromisoformat(row.get("addtime") or "")
+            date = datetime.fromisoformat(row.get('addtime') or '')
             if date.tzinfo is None:
                 date = date.replace(tzinfo=timezone(timedelta(hours=8)))
             timestamp = int(date.timestamp() * 1000)
-        except ValueError:
+        except (TypeError, ValueError):
             timestamp = 0
-        rows.append({"id": str(row.get("id") or ""), "userId": row.get("user_id") or 0,
-                     "nickname": str(row.get("user_name") or ""), "avatar": kg._image(row.get("user_pic")),
-                     "content": str(row.get("content") or ""), "time": timestamp,
-                     "liked": (row.get("like") or {}).get("count") or 0, "beNickname": "",
-                     "beContent": str(row.get("pcontent") or ""), "replyCount": row.get("reply_num") or 0})
-    return {"comments": rows, "total": payload.get("count") or 0,
-            "more": bool(rows and page < min(payload.get("maxPage") or 0, 500))}
+        comment = {'id': str(row.get('id') or ''), 'userId': row.get('user_id') or 0,
+                   'nickname': str(row.get('user_name') or ''), 'avatar': kg._image(row.get('user_pic')),
+                   'content': str(row.get('content') or ''), 'time': timestamp,
+                   'liked': (row.get('like') or {}).get('count') or 0, 'beNickname': str(row.get('puser_name') or ''),
+                   'beContent': str(row.get('pcontent') or ''), 'replyCount': row.get('reply_num') or 0}
+        thread = str(row.get('special_child_id') or '')
+        if with_thread and _COMMENT_ID.fullmatch(comment['id']) and _REPLY_THREAD.fullmatch(thread):
+            comment['replyThread'] = thread
+        rows.append(comment)
+    return rows
+
+
+def comments(ident, page, limit):
+    kg.track(ident)
+    _, mix_id = ident.split('-')
+    payload = _read('/comment/music', {'mixsongid': mix_id, 'page': page, 'pagesize': limit})
+    rows = _comment_rows(payload.get('list') or [], with_thread=True)
+    return {'comments': rows, 'total': payload.get('count') or 0,
+            'more': bool(rows and page < min(payload.get('maxPage') or 0, 500))}
+
+
+def comment_replies(ident, comment_id, thread, page, limit):
+    if not _COMMENT_ID.fullmatch(comment_id) or not _REPLY_THREAD.fullmatch(thread):
+        raise kg.Error(400, 'invalid_input', '酷狗评论 ID 或楼层标识无效')
+    kg.track(ident)
+    _, mix_id = ident.split('-')
+    payload = _read('/comment/floor', {'mixsongid': mix_id, 'tid': comment_id, 'special_id': thread,
+                                     'page': page, 'pagesize': limit})
+    if payload.get('err_code') == 60102:
+        raise kg.Error(404, 'not_found', '没有找到该楼层')
+    if (payload.get('err_code') != 0 or str(payload.get('tid')) != comment_id
+            or str(payload.get('childrenid')) != thread):
+        raise kg.Error(502, 'kugou_upstream_error', '酷狗楼层暂不可用')
+    rows = _comment_rows(payload.get('list') or [])
+    total = payload.get('comments_num') or 0
+    return {'comments': rows, 'total': total, 'more': bool(rows and page * limit < total and page < 500)}
 
 
 def radio_stations():
