@@ -3,6 +3,7 @@
 from contextlib import closing
 import json
 import re
+import time
 
 import cm_db
 import cm_kugou as kg
@@ -37,7 +38,8 @@ CREATE TABLE IF NOT EXISTS kugou_plays (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   track_id TEXT NOT NULL REFERENCES kugou_tracks(id),
-  elapsed_ms INTEGER NOT NULL DEFAULT 0
+  elapsed_ms INTEGER NOT NULL DEFAULT 0,
+  started_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_kugou_recent ON kugou_plays(user_id, track_id, id DESC);
 CREATE TABLE IF NOT EXISTS kugou_roaming_skips (
@@ -48,6 +50,11 @@ CREATE TABLE IF NOT EXISTS kugou_roaming_skips (
 );
 CREATE INDEX IF NOT EXISTS idx_kugou_roaming_skip_user ON kugou_roaming_skips(user_id, id DESC);
 """
+
+
+def migrate(conn):
+    if 'started_at' not in {row[1] for row in conn.execute('PRAGMA table_info(kugou_plays)')}:
+        conn.execute('ALTER TABLE kugou_plays ADD COLUMN started_at INTEGER NOT NULL DEFAULT 0')
 
 
 def _connection():
@@ -216,8 +223,8 @@ def record(uid, ident, play_id, elapsed_ms):
         tracks = _new_resources([ident])
         with _connection() as conn, conn:
             _save_resources(conn, tracks)
-            play_id = conn.execute("INSERT INTO kugou_plays(user_id, track_id) VALUES(?, ?)",
-                                   (uid, ident)).lastrowid
+            play_id = conn.execute("INSERT INTO kugou_plays(user_id,track_id,started_at) VALUES(?,?,?)",
+                                   (uid, ident, int(time.time()))).lastrowid
     else:
         with _connection() as conn, conn:
             result = conn.execute("""UPDATE kugou_plays SET elapsed_ms=MAX(elapsed_ms, ?)
@@ -226,6 +233,26 @@ def record(uid, ident, play_id, elapsed_ms):
                 raise kg.Error(404, "not_found", "播放记录不存在")
     return {"ok": True, "playId": str(play_id)}
 
+
+
+def summary(uid, limit):
+    now = int(time.time())
+    today = (now + 8 * 3600) // 86400 * 86400 - 8 * 3600
+    week = today - 6 * 86400
+    with _connection() as conn:
+        conn.execute('BEGIN')
+        totals = conn.execute("""SELECT COALESCE(SUM(elapsed_ms),0) AS totalMs,
+            COALESCE(SUM(CASE WHEN started_at>=? THEN elapsed_ms ELSE 0 END),0) AS weekMs,
+            COUNT(DISTINCT CASE WHEN started_at>=? THEN track_id END) AS todayTracks,
+            COUNT(DISTINCT track_id) AS totalTracks, COUNT(*) AS plays
+            FROM kugou_plays WHERE user_id=? AND elapsed_ms>0""", (week,today,uid)).fetchone()
+        ranks = conn.execute("""SELECT t.resource,p.plays,p.elapsed FROM (
+                SELECT track_id,COUNT(*) AS plays,SUM(elapsed_ms) AS elapsed
+                FROM kugou_plays WHERE user_id=? AND elapsed_ms>0 AND started_at>=?
+                GROUP BY track_id ORDER BY plays DESC, MAX(id) DESC LIMIT ?
+            ) p JOIN kugou_tracks t ON t.id=p.track_id ORDER BY p.plays DESC,p.elapsed DESC,p.track_id""",
+            (uid, week, limit)).fetchall()
+    return {**dict(totals), 'rank': [{**_track(row), 'plays': row['plays'], 'listenedMs': row['elapsed']} for row in ranks]}
 
 
 def roaming_exclusions(uid):

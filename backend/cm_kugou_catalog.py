@@ -428,3 +428,32 @@ def artist_directory(group, offset, limit):
 def new_songs(limit):
     rows = _read('/top/song', {'pagesize': limit}).get('data') or []
     return {'items': _kinds(rows, _audio), 'nextOffset': None}
+
+
+
+def _spoken_show(row):
+    ident = str(row.get('album_id') or '')
+    if _NUMBER.fullmatch(ident):
+        return _resource(ident, 'podcast', row.get('album_name'), row.get('sizable_cover'), artists=row.get('author_name'),
+                         description=row.get('intro'), count=row.get('audio_total'))
+
+
+def spoken_shows(limit):
+    data = _read('/longaudio/daily/recommend').get('data') or {}
+    return {'items': _kinds(data.get('albums', []), _spoken_show)[:limit], 'nextOffset': None}
+
+
+def spoken_show(ident, offset, limit):
+    if not _NUMBER.fullmatch(ident):
+        raise kg.Error(400, 'invalid_input', '无效的有声节目专辑 ID')
+    rows = _read('/longaudio/album/detail', {'album_id': ident}).get('data') or []
+    resource = next((item for item in _kinds(rows, _spoken_show) if item['id'] == ident), None)
+    if not resource:
+        raise kg.Error(404, 'not_found', '未找到该酷狗有声节目')
+
+    def fetch(page, size):
+        response = _read('/longaudio/album/audios', {'album_id': ident, 'page': page, 'pagesize': size})
+        return response.get('data') or [], response.get('total')
+
+    tracks, next_offset = _page(fetch, offset, limit)
+    return {'resource': resource, 'tracks': _kinds(tracks, _audio), 'nextOffset': next_offset}
