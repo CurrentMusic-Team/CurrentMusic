@@ -40,6 +40,10 @@ curl 'https://music.20110208.xyz/cm/music-service/v1/catalog.search' \
 
 [第三方网易云绑定与同步](third-party-ncm-sync.md) · [网易云评论接入](ncm-comments-api.md)
 
+## 歌单来源与同步
+
+Web 与 X 通过 CurrentMusic 账号同步流声聚合歌单。已绑定用户默认读取当前平台 App 歌单，可在设置中更改来源。原外接协议的 `library.*` 继续使用各自的旧曲库契约。[聚合歌单接口](aggregate-library-api.md)
+
 ## 接口清单
 
 <!-- music-service-operations -->

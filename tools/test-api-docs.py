@@ -63,6 +63,15 @@ class DocumentationTests(unittest.TestCase):
             self.assertTrue((output/'guide-qq-music-api.md').is_file())
             self.assertTrue((output/'guide-audio-sources-api.md').is_file())
             self.assertTrue((output/'guide-music-service-api.md').is_file())
+            self.assertTrue((output/'guide-aggregate-library-api.md').is_file())
+            library_routes = {(item['method'], item['path']) for item in manifest
+                              if item['group'] == '曲库与聚合歌单'}
+            self.assertTrue({('GET', '/cm/library/v2/preferences'), ('PUT', '/cm/library/v2/preferences'),
+                             ('PUT', '/cm/library/v2/playlists/{id}/order'), ('GET', '/cm/library/v2/shared/{id}'),
+                             ('POST', '/cm/library/v2/favorites/status')} <= library_routes)
+            self.assertIn('(guide-aggregate-library-api.md)', (output/'guide-kugou-concept-api.md').read_text())
+            self.assertIn('(guide-aggregate-library-api.md)', (output/'guide-netease-music-api.md').read_text())
+
             kugou_account = {(item["method"], item["path"]) for item in manifest
                              if item["path"].startswith("/cm/kugou/account")}
             self.assertEqual(kugou_account, {

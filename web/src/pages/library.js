@@ -1,187 +1,56 @@
-// 歌单库页：网易云同步歌单 + 我的歌单 + 我喜欢的/收藏（排行榜已移至首页）
-import { mdui } from '../md.js';
-import { api, auth } from '../api.js';
-import { kugouRequest } from '../kugou.js';
-import { kugouPersonalLink, kugouPlaylists, kugouWrite } from '../kugou-library.js';
+import { api, auth, settings } from '../api.js';
+import { allLibraryItems, libraryCall, libraryLink, libraryPreferences, platformLabels } from '../library-v2.js';
 import { musicPlatform } from '../music-platform.js';
-import { esc, toast, confirmDialog, promptDialog, skelGrid } from '../ui.js';
+import { esc, promptDialog, skelGrid, toast } from '../ui.js';
 
 export async function render(el) {
-  const kugou = musicPlatform() === 'kugou';
+  const platform = musicPlatform();
   if (!auth.token) {
-    el.innerHTML = `<div class="cm-login-tip page">
-      <span class="material-icons-outlined" style="font-size:calc(44px * var(--cm-fs, 1))">library_music</span>
-      <div>${kugou ? '登录后即可创建歌单和收藏酷狗歌曲' : '登录后即可创建歌单、收藏歌曲、同步网易云歌单'}</div>
-      <mdui-button variant="filled" href="#/user">去登录</mdui-button>
-    </div>`;
+    el.innerHTML = `<div class="cm-login-tip page"><span class="material-icons-outlined">library_music</span>
+      <div>登录后即可创建歌单和收藏歌曲</div><mdui-button variant="filled" href="#/user">去登录</mdui-button></div>`;
     return;
   }
-
   el.innerHTML = skelGrid(6);
-  let me = null, pls = [], bind = { bound: false }, favorites = 0;
-  if (kugou) {
-    try {
-      const [playlists, liked] = await Promise.all([
-        kugouPlaylists(),
-        kugouRequest('library.favorites', { limit: 1 }),
-      ]);
-      pls = playlists;
-      favorites = liked.total;
-    } catch (error) {
-      el.innerHTML = `<div class="cm-empty">${esc(error.message)}</div>`;
-      return;
-    }
-  } else {
-    await Promise.allSettled([
-      api.me().then(d => { me = d; }),
-      api.myPlaylists().then(d => { pls = d.playlists || []; }),
-      api.bindStatus().then(d => { bind = d; }),
+  const guard = el.firstElementChild;
+  const current = () => guard?.isConnected && musicPlatform() === platform;
+  const token = auth.token, base = settings.base;
+  try {
+    const [{ providers }, snapshots] = await Promise.all([
+      libraryPreferences(),
+      platform === 'netease' ? api.myPlaylists().then(data => data.playlists.filter(row => row.source === 'ncm')).catch(() => []) : [],
     ]);
-  }
-
-  // 网易云同步：按 /user/playlist 的上游顺序展示（我喜欢的音乐 → 自建 → 收藏），
-  // 与网易云 App「我的 → 音乐」一致；本地歌单仍按创建时间倒序。
-  const ncmPls = pls
-    .filter(p => p.source === 'ncm')
-    .sort((a, b) => (a.ncmOrder ?? 1e9) - (b.ncmOrder ?? 1e9));
-  const localPls = pls.filter(p => p.source !== 'ncm');
-  const coverHTML = p => p.cover
-    ? `<img src="${esc(p.cover)}" loading="lazy" onerror="this.remove()"><span class="material-icons-outlined">queue_music</span>`
-    : `<span class="material-icons-outlined">queue_music</span>`;
-
-  // 歌单页的定时器随页面实例销毁；进入页面时安排下一次本地午夜同步
-  let midnightTimer = null;
-  const scheduleMidnightSync = () => {
-    clearTimeout(midnightTimer);
-    const now = new Date();
-    const next = new Date(now);
-    next.setHours(24, 0, 0, 0);
-    midnightTimer = setTimeout(async () => {
-      if (bind.bound) {
-        try { await api.syncNcm(); toast('已自动刷新网易云歌单'); } catch (e) { toast('自动刷新歌单失败：' + e.message); }
-        render(el);                         // 新页面实例会重新安排下一次午夜
-        return;
-      }
-      scheduleMidnightSync();
-    }, Math.max(1000, next - now));
-  };
-  if (!kugou) scheduleMidnightSync();
-
-  el.innerHTML = `
-    <div class="cm-quickrow">
-      <a class="cm-quick" href="${kugou ? kugouPersonalLink() : '#/pl/likes'}"><span class="material-icons-outlined">favorite</span><b>${kugou ? '酷狗概念版' : 'CurrentMusic'}·我喜欢</b><i>${kugou ? favorites : me?.stat?.likes || 0} 首</i></a>
-      ${bind.bound && bind.ncmLikedPlId
-        ? `<a class="cm-quick" href="#/pl/${bind.ncmLikedPlId}"><span class="material-icons-outlined">cloud_done</span><b>网易云·我喜欢</b><i>红心歌单</i></a>`
-        : ''}
-    </div>
-
-    ${kugou ? '' : ncmPls.length || bind.bound ? `
-    <div class="cm-sec-head"><h2>网易云同步</h2>
-      <span class="cm-sec-more" id="syncNcm"><span class="material-icons-outlined">refresh</span> 刷新歌单</span></div>
-    <div class="cm-plgrid" id="ncmGrid">
-      ${ncmPls.map(p => `
-        <div class="cm-plcard" data-id="${esc(p.id)}">
-          <div class="cm-plcover">${coverHTML(p)}<span class="cm-ncmbadge">网易云</span></div>
-          <div class="cm-plname">${esc(p.name)}</div>
-          <div class="cm-plsub">${p.track_count} 首</div>
-        </div>`).join('') || `<div class="cm-empty small">${bind.stale ? '绑定已失效，请到「我的」页重新绑定' : '还没有同步到歌单，点右上角立即同步'}</div>`}
-    </div>` : `
-    <div class="cm-bindbanner" id="bindBanner">
-      <span class="material-icons-outlined">cloud_sync</span>
-      <div class="cm-bindbanner-t"><b>绑定网易云音乐，自动同步全部歌单</b><span>手机验证码或扫码授权均可，随时可解绑</span></div>
-      <mdui-button variant="tonal" compact id="goBind">去绑定</mdui-button>
-    </div>`}
-
-    <div class="cm-sec-head"><h2>我的歌单</h2>
-      ${kugou ? '' : '<span class="cm-sec-more" id="plazaEntry"><span class="material-icons-outlined">explore</span> 歌单广场</span>'}
-      <span class="cm-sec-more" id="newPl"><span class="material-icons-outlined">add</span> 新建</span></div>
-    <div class="cm-plgrid" id="plGrid">
-      ${localPls.map(p => `
-        <div class="cm-plcard" data-id="${esc(p.id)}">
-          <div class="cm-plcover">${coverHTML(p)}</div>
-          <div class="cm-plname">${esc(p.name)}</div>
-          <div class="cm-plsub">${p.track_count} 首</div>
-          <div class="cm-plmenu" data-id="${esc(p.id)}"><span class="material-icons-outlined">more_vert</span></div>
-        </div>`).join('') || `<div class="cm-empty small">还没有歌单，点右上角新建</div>`}
-    </div>
-
-`;
-
-  el.querySelector('#syncNcm')?.addEventListener('click', async () => {
-    if (!bind.bound) { toast('请先到「我的」页绑定网易云账号'); return; }
-    const btn = el.querySelector('#syncNcm');
-    if (!btn || btn.dataset.loading) return;
-    btn.dataset.loading = '1';
-    btn.innerHTML = '<mdui-circular-progress style="--mdui-circular-progress-size:18px"></mdui-circular-progress> 刷新中…';
-    try {
-      const r = await api.syncNcm();
-      toast(`已刷新 ${r.imported || 0} 个歌单 / ${r.tracks || 0} 首歌`);
+    const selection = providers[platform];
+    const sourceName = selection.source === 'native' ? platformLabels[platform] + ' App' : '流声聚合歌单';
+    const result = await allLibraryItems('playlists', { platform, source: selection.source }).catch(error => error);
+    if (!current() || token !== auth.token || base !== settings.base) return;
+    const cards = Array.isArray(result) ? result.filter(playlist => !playlist.liked).map(playlist => `
+      <a class="cm-plcard" href="${libraryLink(esc(playlist.id))}">
+        <div class="cm-plcover">${playlist.artwork ? `<img src="${esc(playlist.artwork)}" loading="lazy" alt="">` : ''}<span class="material-icons-outlined">queue_music</span></div>
+        <div class="cm-plname">${esc(playlist.name)}</div><div class="cm-plsub">${playlist.trackCount} 首</div>
+      </a>`).join('') : `<div class="cm-empty small">${esc(result.message)} <a href="#/user">管理绑定</a></div>`;
+    el.innerHTML = `
+      <div class="cm-quickrow"><a class="cm-quick" href="#/library/favorites"><span class="material-icons-outlined">favorite</span><b>我喜欢</b><i>${sourceName}</i></a></div>
+      <div class="cm-sec-head"><h2>我的歌单</h2><a href="#/settings" class="cm-sec-more">${sourceName}</a>
+        <a class="cm-sec-more" href="#/plaza">歌单广场</a>
+        ${selection.writable ? '<button type="button" class="cm-sec-more" id="newPl">新建</button>' : ''}</div>
+      <div class="cm-plgrid" id="plGrid">${cards || '<div class="cm-empty small">还没有歌单</div>'}</div>
+      ${!selection.writable && selection.binding === 'bound' ? '<p class="cm-empty small">当前可以浏览酷狗 App 歌单。可在设置中切换为流声聚合歌单进行编辑。</p>' : ''}
+      ${snapshots.length ? `<details><summary>网易云旧同步快照</summary><div class="cm-setting-list">${snapshots.map(p => `
+        <div class="cm-setting"><a href="#/pl/${esc(p.id)}">${esc(p.name)}</a>
+          <button type="button" class="cm-sec-more" data-import="${esc(p.id)}">复制到聚合歌单</button></div>`).join('')}</div></details>` : ''}`;
+    el.querySelector('#newPl')?.addEventListener('click', () => promptDialog({ title: '新建歌单', label: '歌单名称', onOk: async name => {
+      await libraryCall('POST', 'playlists', { platform, source: selection.source, body: { name } });
+      toast('歌单已创建');
       render(el);
-    } catch (e) {
-      delete btn.dataset.loading;
-      btn.innerHTML = '<span class="material-icons-outlined">refresh</span> 刷新歌单';
-      toast('刷新歌单失败：' + e.message);
-    }
-  });
-  el.querySelector('#goBind')?.addEventListener('click', () => {
-    import('../ncmbind.js').then(m => m.bindDialog(() => render(el)));
-  });
-
-  el.querySelector('#newPl').onclick = () => {
-    promptDialog({
-      title: '新建歌单', label: '歌单名称', placeholder: '给歌单起个名字',
-      onOk: async name => {
-        if (kugou) await kugouWrite('library.playlist.create', { name });
-        else await api.createPlaylist(name, '');
-        toast('歌单已创建');
-        render(el);
-      },
+    }}));
+    el.querySelectorAll('[data-import]').forEach(button => button.onclick = async () => {
+      button.disabled = true;
+      try {
+        const { resource } = await libraryCall('POST', 'playlists/import', { body: { snapshotId: button.dataset.import } });
+        location.hash = libraryLink(resource.id);
+      } catch (error) { toast(error.message); button.disabled = false; }
     });
-  };
-  el.querySelector('#plazaEntry')?.addEventListener('click', () => { location.hash = '#/plaza'; });
-  el.querySelectorAll('.cm-plcard').forEach(c => {
-    c.onclick = e => { if (!e.target.closest('.cm-plmenu')) location.hash = kugou ? kugouPersonalLink(c.dataset.id) : `#/pl/${c.dataset.id}`; };
-  });
-  el.querySelectorAll('.cm-plmenu').forEach(m => {
-    m.onclick = e => {
-      e.stopPropagation();
-      const pid = kugou ? m.dataset.id : Number(m.dataset.id);
-      const pl = localPls.find(p => p.id === pid);
-      if (!pl) return;
-      mdui.dialog({
-        headline: pl.name,
-        body: `<div class="cm-qm">
-          <div class="cm-qm-item" id="mRename"><span class="material-icons-outlined">edit</span> 重命名</div>
-          <div class="cm-qm-item" id="mDel"><span class="material-icons-outlined">delete</span> 删除歌单</div>
-        </div>`,
-        actions: [{ text: '取消' }],
-      });
-      setTimeout(() => {
-        document.getElementById('mRename').onclick = () => {
-          document.querySelectorAll('mdui-dialog').forEach(d => d.open = false);
-          promptDialog({
-            title: '重命名歌单', label: '新名称', value: pl.name,
-            onOk: async name => {
-              if (kugou) await kugouWrite('library.playlist.edit', { id: pid, name });
-              else await api.updatePlaylist(pid, { name });
-              toast('已重命名');
-              render(el);
-            },
-          });
-        };
-        document.getElementById('mDel').onclick = () => {
-          document.querySelectorAll('mdui-dialog').forEach(d => d.open = false);
-          confirmDialog({
-            title: `删除歌单「${pl.name}」？`, body: '删除后不可恢复。',
-            onOk: async () => {
-              if (kugou) await kugouWrite('library.playlist.delete', { id: pid });
-              else await api.deletePlaylist(pid);
-              toast('已删除');
-              render(el);
-            },
-          });
-        };
-      }, 0);
-    };
-  });
+  } catch (error) {
+    if (current()) el.innerHTML = `<div class="cm-empty">${esc(error.message)}</div>`;
+  }
 }

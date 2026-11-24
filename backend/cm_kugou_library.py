@@ -142,7 +142,9 @@ def playlist(uid, ident, offset, limit):
         conn.execute("BEGIN")
         resource = _playlist(_owned(conn, uid, pid))
         rows = conn.execute("""SELECT k.resource FROM kugou_playlist_tracks t JOIN kugou_tracks k ON k.id=t.track_id
-                               WHERE t.playlist_id=? ORDER BY t.seq LIMIT ? OFFSET ?""",
+                               LEFT JOIN aggregate_playlists p ON p.kugou_alias=t.playlist_id
+                               LEFT JOIN aggregate_tracks a ON a.playlist_id=p.playlist_id AND a.provider='kugou' AND a.track_id=t.track_id
+                               WHERE t.playlist_id=? ORDER BY COALESCE(a.position,t.seq) LIMIT ? OFFSET ?""",
                             (pid, limit + 1, offset)).fetchall()
     page = _page(rows, offset, limit, _track)
     return {"resource": resource, "tracks": page["items"], "nextOffset": page["nextOffset"]}

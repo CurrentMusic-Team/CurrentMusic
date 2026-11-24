@@ -368,3 +368,63 @@ def radio(limit, offset, seeds, excluded, station=""):
             seen.add(item["id"])
             unique.append(item)
     return {"items": unique[:limit], "nextOffset": next_offset if unique else None}
+
+
+def track_insights(ident):
+    resource, meta, audio = kg.track(ident)
+    qualities = []
+    for level, label, suffix in [('standard', '标准', ''), ('exhigh', '高品质', '_320'), ('lossless', '无损', '_flac')]:
+        if kg.video_hash(audio.get('hash' + suffix)):
+            bitrate = audio.get('bitrate' + suffix) or 0
+            qualities.append({'level': level, 'label': label, 'br': bitrate * 1000 if 0 < bitrate < 5000 else bitrate,
+                              'size': audio.get('filesize' + suffix) or 0})
+    return {'resource': resource, 'qualities': qualities,
+            'albumId': str(meta.get('album_id') or ''), 'language': meta.get('language') or '',
+            'publishDate': meta.get('publish_date') or '', 'version': meta.get('version') or ''}
+
+
+def playlist_categories():
+    rows = _read('/playlist/tags').get('data') or []
+    return {'items': [{'id': str(tag['tag_id']), 'name': tag['tag_name'], 'group': group['tag_name']}
+                      for group in rows for tag in group.get('son', []) if tag.get('tag_id') and tag.get('tag_name')]}
+
+
+def playlist_directory(category, offset, limit):
+    if category and not _NUMBER.fullmatch(category):
+        raise kg.Error(400, 'invalid_input', '无效的歌单分类')
+    params = {'category_id': category or '0'}
+    # This upstream returns fixed pages of 35 entries even when pagesize is supplied.
+    size = 35
+    cursor, skip = divmod(offset, size)
+    items = []
+    next_offset = None
+    consumed = 0
+    while consumed < limit:
+        data = _read('/top/playlist', {**params, 'page': cursor + 1, 'pagesize': size}).get('data') or {}
+        batch = data.get('special_list') or []
+        candidates = batch[skip:skip + limit - consumed]
+        items.extend(_kinds(candidates, _playlist))
+        consumed += len(candidates)
+        if skip + len(candidates) >= len(batch) and (len(batch) != size or not data.get('has_next')):
+            break
+        next_offset = offset + consumed
+        if not candidates or skip + len(candidates) < len(batch):
+            break
+        cursor, skip = cursor + 1, 0
+    return {'items': items, 'nextOffset': next_offset if consumed == limit else None}
+
+
+def artist_directory(group, offset, limit):
+    data = _read('/artist/lists', {'hotsize': 30}).get('data') or {}
+    groups = data.get('info') or []
+    rows = next((item.get('singer') or [] for item in groups if item.get('title') == (group or '热门')), [])
+    items = _kinds([{'author_id': row.get('singerid'), 'author_name': row.get('singername'),
+                    'sizable_avatar': row.get('imgurl'), 'song_count': row.get('songcount')}
+                   for row in rows[offset:offset + limit]], _artist)
+    return {'items': items, 'groups': [item['title'] for item in groups if item.get('title')],
+            'nextOffset': offset + limit if offset + limit < len(rows) else None}
+
+
+def new_songs(limit):
+    rows = _read('/top/song', {'pagesize': limit}).get('data') or []
+    return {'items': _kinds(rows, _audio), 'nextOffset': None}

@@ -729,6 +729,8 @@ def init():
     if pccols and "reply_to" not in pccols:
         conn.execute("ALTER TABLE post_comments ADD COLUMN reply_to INTEGER NOT NULL DEFAULT 0")
     conn.commit()
+    import cm_aggregate
+    cm_aggregate.migrate(conn)
     conn.close()
     # 头像挂件目录同步（清单文件缺失/损坏时静默跳过，不影响服务启动）
     try:
@@ -2121,7 +2123,8 @@ def public_profile(uid):
         pls = conn.execute(
             "SELECT id, name, cover, source,"
             " (SELECT COUNT(*) FROM playlist_tracks t WHERE t.playlist_id=playlists.id) AS track_count"
-            " FROM playlists WHERE user_id=? ORDER BY updated_at DESC", (uid,)
+            " FROM playlists WHERE user_id=? AND NOT EXISTS (SELECT 1 FROM aggregate_playlists a"
+            " WHERE a.playlist_id=playlists.id AND a.legacy_public=0) ORDER BY updated_at DESC", (uid,)
         ).fetchall()
     finally:
         conn.close()
@@ -2769,7 +2772,9 @@ def playlist_track_ids(pid):
     conn = connect()
     try:
         rows = conn.execute(
-            "SELECT ncm_id FROM playlist_tracks WHERE playlist_id=? ORDER BY seq", (pid,)
+            """SELECT t.ncm_id FROM playlist_tracks t LEFT JOIN aggregate_tracks a
+                ON a.playlist_id=t.playlist_id AND a.provider='netease' AND a.track_id=CAST(t.ncm_id AS TEXT)
+                WHERE t.playlist_id=? ORDER BY COALESCE(a.position,t.seq)""", (pid,)
         ).fetchall()
         return [r["ncm_id"] for r in rows]
     finally:

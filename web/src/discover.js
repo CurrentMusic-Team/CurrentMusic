@@ -1,3 +1,5 @@
+import { musicPlatform } from './music-platform.js';
+import { mountKugouDiscover } from './pages/kugou-discover.js';
 // 发现页「音乐」TAB：Banner / 推荐歌单 / 推荐新歌 / 独家放送 / 榜单 / 曲风入口
 // 数据全部来自阶段一的 /ncm/* 泛化网关（接口须在 backend/cm_ncm_registry.py 登记）。
 import { api, auth, ncmSongs } from './api.js';
@@ -35,6 +37,7 @@ function playlistsHTML(list, charts = false) {
 }
 
 export async function mountDiscover(el) {
+  if (musicPlatform() === 'kugou') return mountKugouDiscover(el);
   const root = document.createElement('div');
   root.className = 'cm-disc';
   root.innerHTML = `

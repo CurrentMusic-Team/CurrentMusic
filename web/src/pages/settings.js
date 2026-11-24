@@ -7,7 +7,7 @@ import { api, settings, auth } from '../api.js';
 import { player, playLevel } from '../player.js';
 
 const FX_LABELS = { off: '关闭', jyeffect: '高清臻音', dolby: '杜比全景声', vivid: '臻音全景声', sky: '沉浸环绕声·5.1', 'sky-ste': '沉浸环绕声·环绕' };
-const LIKE_MODE_LABELS = { auto: '自动（已绑定走网易云）', ncm: '网易云红心', local: 'CurrentMusic 我喜欢' };
+import { libraryCall, libraryPreferences, platformLabels, sourceLabels } from '../library-v2.js';
 const fxLabel = () => FX_LABELS[settings.effect] || '关闭';
 import { esc, toast, promptDialog, confirmDialog, COLOR_SCHEMES, getColorSchemeKey, setColorSchemeKey, QUALITY_TIERS, tierLabel, FONT_SCALES, getFontScaleKey, setFontScaleKey, userTagsText } from '../ui.js';
 import { checkUpdate } from '../update.js';
@@ -85,13 +85,11 @@ export async function render(el) {
       <div class="cm-setting" id="dlDir"><span class="material-icons-outlined">download</span>下载目录<i>Music/<wbr>${esc(localStorage.getItem('cm.downloadDir') || 'CurrentMusic')}</i></div>
       ${hasDesktopLyrics ? `<div class="cm-setting" id="desktopLyrics"><span class="material-icons-outlined">subtitles</span>桌面歌词<i id="desktopLyricsV">${desktopState.enabled ? '已开启' : desktopState.permission ? '已关闭' : '未授权'}</i><mdui-switch id="desktopLyricsSw" ${desktopState.enabled ? 'checked' : ''} style="margin-left:8px"></mdui-switch></div>` : ''}
     </div>
-    <div class="cm-sec-head"><h2>红心与点赞</h2></div>
-    <div class="cm-setting-list">
-      <div class="cm-setting" id="likeMode">
-        <span class="material-icons-outlined">favorite</span>默认红心位置
-        <i id="likeModeV">${LIKE_MODE_LABELS[settings.likeMode] || LIKE_MODE_LABELS.auto}</i>
-      </div>
-    </div>
+    ${auth.token ? `<div class="cm-sec-head"><h2>歌单与收藏来源</h2></div>
+    <div class="cm-setting-list" id="librarySources">
+      ${Object.entries(platformLabels).map(([key, name]) => `<div class="cm-setting" data-library-platform="${key}">
+        <span class="material-icons-outlined">library_music</span>${name}<i>加载中…</i></div>`).join('')}
+    </div>` : ''}
     <div class="cm-sec-head"><h2>隐私</h2></div>
     <div class="cm-setting-list">
       <div class="cm-setting" id="sqPublic">
@@ -218,36 +216,32 @@ export async function render(el) {
     location.href = settings.base + '/download/latest';   // 后端 302 到最新版安装包
   });
 
-  el.querySelector('#likeMode').onclick = () => {
-    const cur = settings.likeMode;
-    const items = [
-      ['auto', '自动（推荐）', '已绑定网易云时红心同步到网易云；未绑定写入 CurrentMusic'],
-      ['ncm', '网易云 · 我喜欢的音乐', '未绑定网易云时会自动回退到 CurrentMusic'],
-      ['local', 'CurrentMusic · 我喜欢的音乐', '始终只写入本站，不影响网易云账号'],
-    ];
-    const diag = mdui.dialog({
-      headline: '默认红心保存到',
-      body: `<div class="cm-qm">${items.map(([k, t, sub]) => `
-        <div class="cm-qm-item" data-k="${k}">
-          <span class="material-icons-outlined ${k === cur ? 'red' : ''}">${k === cur ? 'favorite' : 'favorite_border'}</span>
-          <div><div>${t}</div><div class="sub">${sub}</div></div>
-          <span class="material-icons-outlined tail">${k === cur ? 'check' : ''}</span>
-        </div>`).join('')}</div>
-        <div class="cm-more-s" style="margin-top:10px">展示的歌曲红心数始终来自网易云。</div>`,
-      actions: [{ text: '关闭' }],
-    });
-    setTimeout(() => {
-      diag.querySelectorAll('.cm-qm-item').forEach(it => {
-        it.onclick = () => {
-          settings.likeMode = it.dataset.k;
-          const label = el.querySelector('#likeModeV');
-          if (label) label.textContent = LIKE_MODE_LABELS[settings.likeMode] || LIKE_MODE_LABELS.auto;
-          toast('默认红心位置：' + (LIKE_MODE_LABELS[settings.likeMode] || LIKE_MODE_LABELS.auto));
-          diag.open = false;
-        };
-      });
-    }, 0);
-  };
+  const sources = el.querySelector('#librarySources');
+  if (sources) libraryPreferences().then(({ providers }) => {
+    if (!sources.isConnected) return;
+    for (const row of sources.querySelectorAll('[data-library-platform]')) {
+      const platform = row.dataset.libraryPlatform;
+      let mode = providers[platform].mode;
+      const label = row.querySelector('i');
+      label.textContent = sourceLabels[mode];
+      row.onclick = () => {
+        const dialog = mdui.dialog({ headline: platformLabels[platform] + '歌单与收藏来源', body: `<div class="cm-qm">
+          ${Object.entries(sourceLabels).map(([value, text]) => `<button type="button" class="cm-qm-item" data-mode="${value}">${text}${mode === value ? ' ✓' : ''}</button>`).join('')}
+          <p>自动模式在绑定后使用对应 App 歌单。所选来源也用于红心和「我喜欢」。</p></div>`, actions: [{ text: '关闭' }] });
+        dialog.querySelectorAll('[data-mode]').forEach(button => button.onclick = async () => {
+          try {
+            const choice = button.dataset.mode;
+            await libraryCall('PUT', 'preferences', { body: { providers: { [platform]: choice } } });
+            mode = choice;
+            label.textContent = sourceLabels[mode];
+            dialog.open = false;
+            window.dispatchEvent(new Event('cm-library-source'));
+            toast('歌单与收藏来源已更新');
+          } catch (error) { toast(error.message); }
+        });
+      };
+    }
+  }).catch(() => sources.querySelectorAll('i').forEach(label => { label.textContent = '暂不可用'; }));
 
   el.querySelector('#scheme').onclick = () => {
     const cur = getColorSchemeKey();

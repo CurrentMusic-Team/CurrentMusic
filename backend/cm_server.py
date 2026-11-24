@@ -36,7 +36,10 @@ import cm_levels
 import cm_mail
 import cm_music_service
 import cm_kugou
+import cm_kugou_catalog
 import cm_kugou_account
+import cm_aggregate
+import cm_library_api
 import cm_ncm
 import cm_songinfo
 import cm_binding_import
@@ -375,7 +378,8 @@ def _share_ncm_playlist(pid):
 def _share_local_playlist(pid):
     """CurrentMusic 自建歌单分享元数据。"""
     pl = cm_db.get_playlist(int(pid))
-    if not pl:
+    visibility = cm_aggregate.visibility(int(pid))
+    if not pl or (visibility and not visibility["legacy_public"]):
         raise ApiError(404, "歌单不存在")
     owner = cm_db.get_user(pl.get("user_id")) or {}
     count = len(cm_db.playlist_track_ids(int(pid)))
@@ -433,6 +437,29 @@ def _share_album(aid):
     }
     cm_db.cache_set(key, json.dumps(meta, ensure_ascii=False), 86400)
     return meta
+
+
+def _share_provider_payload(handler, provider, kind, ident):
+    if provider == 'aggregate':
+        data = cm_aggregate.detail(None, cm_aggregate.integer_id(ident), 0, 1, shared=True)['resource']
+        landing = f'/library/shared/{ident}'
+    elif kind == 'song':
+        data = cm_kugou.track(ident)[0]
+        landing = f'/kugou/{ident}'
+    else:
+        data = cm_kugou_catalog.details(kind, ident, 0, 1)['resource']
+        landing = f'/kugou/{kind}/{ident}'
+    origin = base_url(handler)
+    url = f'{origin}/app/#{landing}'
+    name = data['name']
+    sub = data.get('artists') or ('酷狗概念版' if provider == 'kugou' else '流声聚合歌单')
+    sub2 = data.get('album') or (f"{data['trackCount']} 首" if 'trackCount' in data else '')
+    image = f'{origin}/cm/share/{provider}/{kind}/{ident}/image'
+    return {'provider': provider, 'type': kind, 'id': ident, 'name': name, 'pic': data.get('artwork', ''),
+            'sub': sub, 'sub2': sub2, 'artists': data.get('artists', ''), 'album': data.get('album', ''),
+            'duration': data.get('durationMs', 0), 'url': url, 'image': image,
+            'images': {style: f'{image}?style={style}' for style in cm_share.STYLE_VERSIONS},
+            'text': f'{name} · {sub}\n在 CurrentMusic 打开：{url}'}
 
 
 def _share_payload(handler, kind, oid):
@@ -2226,6 +2253,52 @@ def _kugou_account_route(handler, action, body=None, ip=""):
         return jresp(handler, exc.status, {"code": exc.code, "error": str(exc)})
 
 
+# Public routes use a separate URL so legacy playlist links retain their original visibility.
+_LIBRARY_ENDPOINTS = {
+    ('GET', '/library/v2/preferences'): 'preferences',
+    ('PUT', '/library/v2/preferences'): 'preferences.write',
+    ('GET', '/library/v2/playlists'): 'list',
+    ('POST', '/library/v2/playlists'): 'create',
+    ('POST', '/library/v2/playlists/import'): 'import',
+    ('GET', '/library/v2/favorites'): 'favorites',
+    ('POST', '/library/v2/favorites/status'): 'favorites.status',
+    ('PUT', '/library/v2/favorites'): 'favorites.set',
+}
+
+_LIBRARY_PLAYLIST_ACTIONS = {
+    ('GET', None): 'detail', ('PUT', None): 'edit', ('DELETE', None): 'delete',
+    ('POST', 'tracks'): 'add', ('DELETE', 'tracks'): 'remove', ('PUT', 'order'): 'order',
+}
+
+
+def _library_route(handler, method, path, query, body):
+    action = _LIBRARY_ENDPOINTS.get((method, path))
+    ref = None
+    if not action:
+        match = re.fullmatch(r"/library/v2/playlists/((?:aggregate|netease|kugou):[0-9]+)(?:/(tracks|order))?", path)
+        if match:
+            ref, segment = match.groups()
+            action = _LIBRARY_PLAYLIST_ACTIONS.get((method, segment))
+        match = re.fullmatch(r"/library/v2/(aliases/(kgp_[0-9]+)|shared/([0-9]+))", path)
+        if match and method == 'GET':
+            action, ref = ('alias', match[2]) if match[2] else ('shared', match[3])
+    if not action:
+        raise ApiError(404, "歌单接口不存在")
+    uid = None
+    if action != 'shared':
+        user = require_user(handler, allow_query=False)
+        if not cm_kugou.authorized_user(user, "access.library"):
+            return jresp(handler, 403, {"code": "account_access_restricted", "error": "当前账号无法访问曲库"}, cache_control="no-store")
+        uid = user['id']
+    try:
+        result = cm_library_api.dispatch(uid, action, query, body, playlist=ref)
+    except cm_kugou.Error as exc:
+        return jresp(handler, exc.status, {"code": exc.code, "error": str(exc)}, cache_control="no-store")
+    except cm_ncm.NcmError:
+        return jresp(handler, 502, {"code": "upstream_error", "error": "音乐平台暂不可用"}, cache_control="no-store")
+    return jresp(handler, 200, result, cache_control="no-store")
+
+
 def route(handler, method):
     parsed = urlparse(handler.path)
     path = parsed.path.rstrip("/") or "/"
@@ -2271,6 +2344,9 @@ def route(handler, method):
         except ValueError as exc:
             raise ApiError(400, str(exc)) from exc
         return jresp(handler, 200, {"ok": True}, cache_control="no-store")
+
+    if path.startswith("/library/v2/"):
+        return _library_route(handler, method, path, q, body)
 
     if path == "/music-service/descriptor" and method == "GET":
         return jresp(handler, 200, cm_music_service.descriptor(base_url(handler)))
@@ -4149,6 +4225,14 @@ def route(handler, method):
         if not pl:
             raise ApiError(404, "歌单不存在")
         if method == "GET":
+            visibility = cm_aggregate.visibility(pid)
+            if visibility and not visibility["legacy_public"]:
+                try:
+                    viewer = require_user(handler, allow_query=False)
+                except ApiError:
+                    raise ApiError(404, "歌单不存在") from None
+                if viewer["id"] != pl["user_id"]:
+                    raise ApiError(404, "歌单不存在")
             ids = cm_db.playlist_track_ids(pid)
             return jresp(handler, 200, {**pl, "tracks": cm_db.song_rows_to_meta(cm_db.songs_by_ids(ids))})
         u = require_user(handler)
@@ -4980,6 +5064,24 @@ def route(handler, method):
 
     # ---- 分享（歌曲 / 歌单 / 歌手 / 专辑，v1.28.49 起；v1.28.68 扩展到多类型）----
     # 客户端仍可本地 canvas 出图；这里为第三方客户端/网页直接提供渲染好的 JPEG。
+    if path.startswith(("/share/kugou/", "/share/aggregate/")) and method == "GET":
+        m = re.fullmatch(r"/share/(kugou|aggregate)/(song|playlist|artist|album)/([a-z0-9_-]{1,80})(/image)?", path)
+        if not m or (m[1] == 'aggregate' and m[2] != 'playlist'):
+            raise ApiError(400, "分享 ID 格式错误")
+        style = q.get('style', cm_share.DEFAULT_STYLE)
+        if m[4] and style not in cm_share.STYLE_VERSIONS:
+            raise ApiError(400, "分享图样式无效")
+        try:
+            payload = _share_provider_payload(handler, m[1], m[2], m[3])
+            if m[4]:
+                fp = cm_share.ensure_image(payload, payload['url'], style)
+                return serve_file(handler, fp, "image/jpeg", cache="no-store" if m[1] == 'aggregate' else "public, max-age=3600")
+        except cm_kugou.Error as exc:
+            raise ApiError(exc.status, str(exc)) from None
+        except cm_share.ShareUnavailable as exc:
+            raise ApiError(503, str(exc)) from None
+        return jresp(handler, 200, payload, cache_control="no-store")
+
     if path.startswith("/share/") and method == "GET":
         m = re.fullmatch(r"/share/(song|playlist|local-playlist|artist|album)/([0-9]+)(/image)?", path)
         if not m:

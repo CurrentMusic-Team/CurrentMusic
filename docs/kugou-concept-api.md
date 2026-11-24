@@ -21,6 +21,8 @@ curl 'https://music.20110208.xyz/cm/music-service/v1/catalog.search' \
 | `catalog.search` | `query` 和 `kind`，支持 `song`、`album`、`artist`、`playlist`、`lyric`、`mv`。歌词命中可带 `snippet`，歌曲可包含 `videoId` |
 | `catalog.track/album/artist/playlist` | 原样传搜索或发现返回的 `id`，歌单详情也接受榜单 ID。容器详情返回 `tracks`、`albums` 和 `nextOffset`，可用的资源元数据包括 `description`、`trackCount` |
 | `discover.hot/suggest/charts/playlists` | 公开热搜、联想、榜单和推荐歌单 |
+| `discover.playlist.categories`、`discover.playlist.directory`、`discover.artists` | 歌单分类、歌单广场和歌手目录。传 `category` 或 `group` 进行筛选 |
+| `discover.new.songs`、`track.insights` | 推荐新歌和歌曲资料。资料所列音质为文件档位 |
 | `discover.recommendations` | 使用独立曲库会话获取每日推荐歌曲，外接客户端需 `music.library.read` |
 | `catalog.video` | 以酷狗 MV 哈希作为 `id`，返回名称、歌手和原始视频 ID |
 | `track.lyrics` | 歌曲 `id`。返回逐字 KRC 时间轴，或返回逐行 LRC。酷狗提供的译文与罗马音分别写入同一行的 `trans`、`roma` |
@@ -56,6 +58,10 @@ Web 切到酷狗概念版后，可在「我的」页通过短信绑定个人账�
 ## 媒体地址
 
 酷狗音质使用 `standard`、`exhigh`、`lossless`。`auto` 从无损开始，按可用档位降档；指定档位不可用时返回 `playback_unavailable`。取址返回实际音频格式、码率（bps）和 HTTPS 媒体地址。媒体地址支持普通 `GET`、`HEAD` 与单段 `Range`，到期后通过 `playback.resolve` 刷新。上游拒绝、试听或媒体无法验证时不会签发地址。
+
+## 歌单来源与同步
+
+Web 与 X 通过 CurrentMusic 账号同步流声聚合歌单。已绑定用户默认读取当前平台 App 歌单，可在设置中更改来源。原外接协议的 `library.*` 继续使用各自的旧曲库契约。[聚合歌单接口](aggregate-library-api.md)
 
 ## 接口清单
 
