@@ -1,3 +1,5 @@
+import { isKugouSong, kugouRequest } from './kugou.js';
+import { openShare } from './share.js';
 import './songinfo.css';
 // 歌曲详情抽屉（阶段二）：把「单曲维度」的接口聚到一个面板里
 // 音质档位 / 副歌时间 / 红心数 / 创作者 / 音乐百科 / 相似歌曲 / 乐谱 / 评论统计
@@ -72,6 +74,7 @@ export async function seekSongChorus(meta, ms) {
  */
 export async function openSongInfo(meta) {
   if (!meta || !meta.ncm_id) return toast('缺少歌曲信息');
+  if (isKugouSong(meta)) return openKugouInfo(meta);
   const sid = meta.ncm_id;
 
   const diag = mdui.dialog({
@@ -353,4 +356,27 @@ export async function openSongInfo(meta) {
       } catch (e) { el.querySelector('span').textContent = '谱面加载失败'; }
     };
   });
+}
+
+async function openKugouInfo(meta) {
+  const dialog = mdui.dialog({ headline: meta.name, body: `<div class="cm-si">
+    <div class="cm-si-head">${meta.pic ? `<img src="${esc(meta.pic)}" alt="">` : ''}<div>
+      <div class="cm-si-name">${esc(meta.name)}</div><div class="cm-si-sub">${esc(meta.artists || '')}</div></div></div>
+    <div id="kgInfoBody">${loading}</div><div class="cm-si-acts">
+      <mdui-button id="kgInfoRadio" variant="filled">心动模式播放</mdui-button>
+      <mdui-button id="kgInfoShare" variant="tonal">分享歌曲</mdui-button></div></div>`, actions: [{ text: '关闭' }] });
+  dialog.querySelector('#kgInfoRadio').onclick = () => { dialog.open = false; player.startHeart(meta); };
+  dialog.querySelector('#kgInfoShare').onclick = () => { dialog.open = false; openShare(meta); };
+  const host = dialog.querySelector('#kgInfoBody');
+  try {
+    const data = await kugouRequest('track.insights', { id: meta.kugou_id });
+    if (!host.isConnected) return;
+    const fields = [['语言', data.language], ['发行日期', data.publishDate], ['版本', data.version]].filter(([, value]) => value);
+    let content = fields.map(([label, value]) => `<div class="cm-si-row"><b>${label}</b><span>${esc(value)}</span></div>`).join('');
+    if (/^[1-9][0-9]*$/.test(data.albumId)) {
+      content += `<div class="cm-si-row"><b>专辑</b><a href="#/kugou/album/${data.albumId}">${esc(meta.album || data.resource.album || '查看专辑')}</a></div>`;
+    }
+    host.innerHTML = (content ? sec('歌曲资料', content) : '') + sec('音质档位', qualityHTML(data));
+    host.querySelector('a')?.addEventListener('click', () => { dialog.open = false; });
+  } catch (error) { if (host.isConnected) host.innerHTML = empty(error.message); }
 }

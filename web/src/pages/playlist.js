@@ -38,6 +38,7 @@ export async function render(el, params) {
       songs = kugouSongs(result.tracks || result.items);
       nextOffset = result.nextOffset;
       catalogAlbums = result.albums || [];
+      if (catalogKind) shareKind = catalogKind;
       owner = personal;
       removable = favorites || personal;
     } else if (kind === 'pl' && id === 'likes') {
@@ -219,7 +220,7 @@ export async function render(el, params) {
   el.querySelector('#playAll').onclick = () => songs.length ? player.playList(songs, 0) : toast('列表为空');
   const sharePl = el.querySelector('#sharePl');
   if (sharePl) sharePl.onclick = () => openShare({
-    type: shareKind, id, name: title, pic: cover, sub: shareSub,
+    provider: catalogKind ? 'kugou' : 'netease', type: shareKind, id, name: title, pic: cover, sub: shareSub,
     sub2: `共 ${songs.length} 首`,
   });
 

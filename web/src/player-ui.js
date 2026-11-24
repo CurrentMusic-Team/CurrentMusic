@@ -1,6 +1,6 @@
 import { isKugouSong, kugouQuality, kugouRequest, KUGOU_QUALITIES } from './kugou.js';
 // 播放器 UI：底部迷你条 + 全屏播放页（封面/歌词/进度/音质/点赞/收藏/加入歌单）。
-import { kugouAddTracks, kugouPlaylists, kugouWrite } from './kugou-library.js';
+import { allLibraryItems, libraryCall, libraryPreferences, platformLabels, trackRef, writePlaylist } from './library-v2.js';
 import { mdui } from './md.js';
 import { createWaveform, WAVE_STYLE } from './waveform.js';
 import { waveStyle, waveTilt } from './customize.js';
@@ -1553,8 +1553,7 @@ function openMoreDrawer() {
   });
   diag.classList.add('cm-more-dialog');
   if (isKugouSong(m)) {
-    for (const id of ['#mShare', '#mWiki', '.cm-more-dl']) diag.querySelector(id)?.remove();
-    diag.querySelector('#mSongInfo')?.closest('section')?.remove();
+    for (const id of ['#mWiki', '.cm-more-dl']) diag.querySelector(id)?.remove();
   }
   setTimeout(() => {
     const msh = diag.querySelector('#mShare');
@@ -1887,58 +1886,53 @@ export async function openComments(meta) {
 
 export async function addToPlaylist(songs) {
   if (!auth.token) return toast('登录后才能操作歌单');
-  if (!songs || !songs.length) return;
-  const kugou = isKugouSong(songs[0]);
-  if (songs.some(track => isKugouSong(track) !== kugou)) return toast('请选择同一音乐平台的歌曲');
-  let pls = [];
-  try { pls = kugou ? await kugouPlaylists() : ((await api.myPlaylists()).playlists || []).filter(p => p.source !== "ncm"); }
-  catch (e) { return toast(e.message); }
-
-  const diag = mdui.dialog({
-    headline: `加入歌单（${songs.length} 首）`,
-    body: `
-      <div class="cm-pl-pick">
-        ${pls.map(p => `<div class="cm-pl-pick-item" data-id="${esc(p.id)}"><span class="material-icons-outlined">queue_music</span><div><div>${esc(p.name)}</div><div class="sub">${p.track_count} 首</div></div></div>`).join('')}
-        <div class="cm-pl-pick-item new" id="plNew"><span class="material-icons-outlined">add</span><div>新建歌单</div></div>
-      </div>`,
-    actions: [{ text: '取消' }],
-  });
-  setTimeout(() => {
-    diag.querySelectorAll('.cm-pl-pick-item').forEach(el => {
-      el.onclick = async () => {
-        if (el.id === 'plNew') {
-          diag.open = false;
-          const { promptDialog } = await import('./ui.js');
-          promptDialog({
-            title: '新建歌单', label: '歌单名称',
-            onOk: async name => {
-              if (kugou) {
-                const { resource } = await kugouWrite('library.playlist.create', { name,
-                  trackIds: songs.slice(0, 50).map(song => song.kugou_id) });
-                await kugouAddTracks(resource.id, songs.slice(50));
-              } else {
-                const p = await api.createPlaylist(name, '');
-                await api.addPlaylistTracks(p.id, songs);
-              }
-              toast(`已创建「${name}」并加入 ${songs.length} 首`);
-            },
-          });
-          return;
-        }
-        try {
-          if (kugou) await kugouAddTracks(el.dataset.id, songs);
-          else await api.addPlaylistTracks(+el.dataset.id, songs);
-          toast(`已加入「${el.querySelector('div div').textContent}」`);
-          diag.open = false;
-        } catch (e) { toast(e.message); }
-      };
+  if (!songs?.length) return;
+  const tracks = songs.map(trackRef);
+  const platform = tracks[0].provider;
+  const singlePlatform = tracks.every(track => track.provider === platform);
+  try {
+    const { providers } = await libraryPreferences();
+    const mode = providers[platform];
+    const useNative = singlePlatform && mode.source === 'native' && mode.writable;
+    const [aggregate, native] = await Promise.all([
+      allLibraryItems('playlists', { platform, source: 'aggregate' }),
+      useNative ? allLibraryItems('playlists', { platform, source: 'native' }) : [],
+    ]);
+    const playlists = [...native, ...aggregate].filter(playlist => playlist.editable);
+    const diagonal = mdui.dialog({ headline: `加入歌单（${tracks.length} 首）`, body: `<div class="cm-pl-pick">
+      ${playlists.map(p => `<button type="button" class="cm-pl-pick-item" data-id="${esc(p.id)}">
+        <span class="material-icons-outlined">queue_music</span><div>${esc(p.name)}<div class="sub">${p.source === 'aggregate' ? '流声聚合歌单' : platformLabels[p.source] + ' App'}</div></div></button>`).join('')}
+      ${useNative ? '<button type="button" class="cm-pl-pick-item new" data-create="native">新建 App 歌单</button>' : ''}
+      <button type="button" class="cm-pl-pick-item new" data-create="aggregate">新建流声聚合歌单</button></div>`, actions: [{ text: '取消' }] });
+    const append = async (playlist, start = 0) => {
+      for (let i = start; i < tracks.length; i += 50) {
+        const result = await writePlaylist(playlist, 'add', { tracks: tracks.slice(i, i + 50) });
+        playlist = result.resource;
+      }
+      toast(`已加入「${playlist.name}」`);
+    };
+    diagonal.querySelectorAll('[data-id]').forEach(button => button.onclick = async () => {
+      button.disabled = true;
+      try { await append(playlists.find(playlist => playlist.id === button.dataset.id)); diagonal.open = false; }
+      catch (error) { toast(error.message); button.disabled = false; }
     });
-  }, 0);
+    diagonal.querySelectorAll('[data-create]').forEach(button => button.onclick = async () => {
+      diagonal.open = false;
+      const { promptDialog } = await import('./ui.js');
+      promptDialog({ title: '新建歌单', label: '歌单名称', onOk: async name => {
+        const source = button.dataset.create;
+        const initial = source === 'aggregate' ? tracks.slice(0, 50) : [];
+        const { resource } = await libraryCall('POST', 'playlists', { platform, source, body: { name, tracks: initial } });
+        await append(resource, initial.length);
+      } });
+    });
+  } catch (error) { toast(error.message); }
 }
 
 export function initPlayerUI() {
   syncThemeVolume();
   renderMini();
+  window.addEventListener('cm-library-source', () => syncPlayerLike(player.meta));
   applyDynamicScheme();   // 启动即随上次播放的封面取色（配色为 dynamic 时）
   // 切换皮肤时若播放页正开着：按新主题重建一次结构与背景（其它皮肤走原模板，等价于原样重开）
   document.addEventListener('cm-uipreset', () => {

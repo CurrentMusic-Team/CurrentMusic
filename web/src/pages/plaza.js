@@ -1,3 +1,5 @@
+import { musicPlatform } from '../music-platform.js';
+import { renderKugouDirectory } from './kugou-discover.js';
 // 歌单广场（阶段三新增）
 // 浏览：/playlist/catlist（全部分类）、/playlist/category/list（按分类取歌单）、
 //      /playlist/highquality/tags、/playlist/hot（标签维度）
@@ -17,6 +19,7 @@ const plCard = pl => `
   </div>`;
 
 export async function render(el, params = {}) {
+  if (musicPlatform() === 'kugou') return renderKugouDirectory(el, 'playlist');
   const tab = params.tab || sessionStorage.getItem(KEY) || 'cat';
   const TABS = [
     { k: 'cat', l: '分类歌单' },

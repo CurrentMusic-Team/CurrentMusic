@@ -37,12 +37,16 @@ const KIND_UI = {
            brand: 'ALBUM SHARE', cta: '在 CurrentMusic 打开专辑', verb: '打开' },
 };
 function kindOf(meta) { return (meta && meta.type) || 'song'; }
-function entityId(meta) { return Number(meta && (meta.id || meta.ncm_id) || 0); }
+function entityId(meta) {
+  if (meta?.provider === 'kugou') return meta.kugou_id || meta.id;
+  return Number(meta && (meta.id || meta.ncm_id) || 0);
+}
 function uiOf(meta) { return KIND_UI[kindOf(meta)] || KIND_UI.song; }
 
 /** 分享落地页地址：歌曲 / 网易云歌单 / 站内歌单 / 歌手 / 专辑。 */
 export function entityUrl(meta) {
   const kind = kindOf(meta), id = entityId(meta);
+  if (meta.provider === 'kugou') return `${appBase()}#/kugou/${kind === 'song' ? '' : kind + '/'}${id}`;
   const path = kind === 'song' ? 'song'
     : kind === 'playlist' ? 'ncmpl'
       : kind === 'local-playlist' ? 'pl'
@@ -50,7 +54,7 @@ export function entityUrl(meta) {
   return `${appBase()}#/${path}/${id}`;
 }
 // 兼容旧的歌曲分享调用。
-export function songUrl(meta) { return `${appBase()}#/song/${meta.ncm_id}`; }
+export function songUrl(meta) { return entityUrl(meta); }
 
 export function postUrl(id) {
   const base = window.NativeApi || location.hostname === 'cm.local' ? `${siteOrigin()}/app/` : appBase();

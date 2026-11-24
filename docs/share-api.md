@@ -95,6 +95,10 @@ GET /cm/share/album/{album_id}
 
 错误：id 非法 400、实体不存在 404、上游异常 502。
 
+## 酷狗与聚合歌单分享
+
+`GET /cm/share/kugou/{kind}/{id}` 支持歌曲、专辑、歌手和公开歌单。`GET /cm/share/aggregate/playlist/{id}` 可读取用户已开启分享的聚合歌单。两个路径可加 `/image` 获取分享图。响应与原分享接口使用相同字段，平台曲目 ID 以字符串返回。
+
 ## 分享落地页
 
 - 歌曲：`…/app/#/song/<id>`

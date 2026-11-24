@@ -455,6 +455,11 @@ OPERATIONS = {
     "discover.charts": Operation("榜单", charts, providers=("netease", "kugou")),
     "discover.recommendations": Operation("每日推荐", recommendation, "music.library.read", providers=("netease", "kugou")),
     "discover.playlists": Operation("推荐歌单", None, providers=("kugou",)),
+    "discover.playlist.categories": Operation("歌单分类", None, providers=("kugou",)),
+    "discover.playlist.directory": Operation("歌单广场", None, providers=("kugou",)),
+    "discover.new.songs": Operation("推荐新歌", None, providers=("kugou",)),
+    "discover.artists": Operation("歌手分类", None, providers=("kugou",)),
+    "track.insights": Operation("歌曲与音质资料", None, providers=("kugou",)),
     "track.lyrics": Operation("歌词", lyrics, providers=(*BOTH, "kugou"), media="lyrics"),
     "track.comments": Operation("歌曲评论", comments, providers=("netease", "kugou")),
     "track.comment.add": Operation("发表评论", comment_add, "music.comment.write", providers=("netease", "kugou"), write=True),
@@ -609,6 +614,16 @@ def kugou_operation(operation, data, uid, origin):
         return result
     if operation == "discover.playlists":
         return cm_kugou_catalog.featured_playlists()
+    if operation == "discover.playlist.categories":
+        return cm_kugou_catalog.playlist_categories()
+    if operation == "discover.playlist.directory":
+        return cm_kugou_catalog.playlist_directory(string(data, "category", 15), *paging(data))
+    if operation == "discover.new.songs":
+        return cm_kugou_catalog.new_songs(integer(data, "limit", 1, 30, 12))
+    if operation == "discover.artists":
+        return cm_kugou_catalog.artist_directory(string(data, "group", 20), *paging(data))
+    if operation == "track.insights":
+        return cm_kugou_catalog.track_insights(_kugou_track_id(data))
     if operation == "roaming.stations":
         return cm_kugou_catalog.radio_stations()
     if operation == "roaming.skip":

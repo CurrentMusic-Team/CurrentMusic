@@ -111,13 +111,13 @@ def _background(hue):
 
 
 def _fetch_cover(url, size):
-    """只抓网易云封面 CDN；不跟随重定向，格式/像素受限（防 SSRF 与解压炸弹）。"""
+    """只抓受支持的封面 CDN；不跟随重定向，格式/像素受限（防 SSRF 与解压炸弹）。"""
     if not url:
         return None
     try:
         sep = "&" if "?" in url else "?"
         data, ctype = cm_net.fetch(url + sep + f"param={size}y{size}",
-                                   allowed_suffixes=("music.126.net",),
+                                   allowed_suffixes=("music.126.net", "kgimg.com", "kugou.com"),
                                    timeout=6.0, max_bytes=8 * 1024 * 1024)
         if not ctype.startswith("image/"):
             return None

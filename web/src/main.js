@@ -56,6 +56,7 @@ import * as home from './pages/home.js';
 import * as levels from './pages/levels.js';
 import * as search from './pages/search.js';
 import * as kugouMusic from './pages/kugou.js';
+import * as libraryPlaylist from './pages/library-playlist.js';
 import * as library from './pages/library.js';
 import * as playlist from './pages/playlist.js';
 import * as plazaPage from './pages/plaza.js';
@@ -112,7 +113,7 @@ const ROUTES = [
   { re: /^#\/kugou\/(album|artist|playlist)\/([a-zA-Z0-9_]{1,80})$/, page: playlist, title: '酷狗概念版',
     fixed: m => ['kugou-' + m[1], m[2]] },
   { re: /^#\/kugou\/me\/favorites$/, page: playlist, title: '我喜欢的音乐', fixed: ['kugou-favorites'] },
-  { re: /^#\/kugou\/me\/playlist\/(kgp_[1-9][0-9]{0,18})$/, page: playlist, title: '我的歌单', fixed: m => ['kugou-personal', m[1]] },
+  { re: /^#\/kugou\/me\/playlist\/(kgp_[1-9][0-9]{0,18})$/, page: libraryPlaylist, title: '我的歌单', fixed: m => ['alias', m[1]] },
   { re: /^#\/kugou\/charts$/, page: playlist, title: '排行榜', fixed: ['kugou-charts'] },
   { re: /^#\/square$/, page: squarePage, title: '发现' },
   { re: /^#\/u\/(\d+)$/, page: profilePage, title: '用户主页', fixed: m => [m[1]] },
@@ -142,7 +143,10 @@ const ROUTES = [
   { re: /^#\/video\/([A-Za-z0-9]+)$/, page: videoPage, title: '视频', fixed: m => [m[1]] },
   { re: /^#\/videohome$/, page: videoPage, title: '视频广场', fixed: ['home'] },
   { re: /^#\/followed$/, page: followedPage, title: '关注的歌手' },
-  { re: /^#\/library$/, page: library, title: '歌单' },
+  { re: /^#\/library\/playlist\/((?:aggregate|netease|kugou):[1-9][0-9]*)$/, page: libraryPlaylist, title: '歌单', fixed: m => ['playlist', m[1]] },
+  { re: /^#\/library\/shared\/([1-9][0-9]*)$/, page: libraryPlaylist, title: '分享歌单', fixed: m => ['shared', m[1]] },
+  { re: /^#\/library\/favorites$/, page: libraryPlaylist, title: '我喜欢', fixed: ['favorites'] },
+  { re: /^#\/library$/,  page: library, title: '歌单' },
   { re: /^#\/plaza$/, page: plazaPage, title: '歌单广场' },
   { re: /^#\/user$/, page: user, title: '我的' },
   { re: /^#\/security-question$/, page: securityQuestionPage, title: '登录密保问题' },
@@ -162,6 +166,7 @@ const ROUTES = [
   { re: /^#\/announce\/(\d+)$/, page: announceEditPage, title: '编辑公告', fixed: m => [m[1]] },
   { re: /^#\/rooms$/, page: roomsPage, title: '一起听' },
   { re: /^#\/room\/(\d+)$/, page: roomPage, title: '听歌房', fixed: m => [m[1]] },
+  { re: /^#\/pl\/likes$/, page: libraryPlaylist, title: '我喜欢', fixed: ['favorites'] },
   { re: /^#\/pl\/(.+)$/, page: playlist, title: '歌单', fixed: m => ['pl', m[1]] },
   { re: /^#\/passport\/authorize$/, page: passportPage, title: '通行证授权' },
   { re: /^#\/daily$/, page: playlist, title: '每日推荐', fixed: ['daily'] },

@@ -30,7 +30,7 @@ GROUPS = {
     'roaming': '私人漫游', 'share': '分享', 'plays': '播放历史', 'decorations': '头像挂件',
     'download': '客户端与资源', 'x': '客户端与资源', 'cast': '客户端与资源', 'badges': '客户端与资源',
     'lx': '客户端与资源', 'audio-sources': '客户端与资源', 'music-service': '外接音乐服务',
-    'kugou': '酷狗概念版',
+    'kugou': '酷狗概念版', 'library': '曲库与聚合歌单',
 }
 MUSIC_PLATFORM_GUIDES = {
     'netease': ('netease-music-api', '网易云音乐 API'),
@@ -58,6 +58,7 @@ GUIDES = {
     'lx-music-source': '落雪音乐自定义音源',
     'audio-sources-api': '自研音源导入与取链',
     'music-service-api': '外接音乐服务协议',
+    'aggregate-library-api': '聚合歌单与多端同步',
     **dict(MUSIC_PLATFORM_GUIDES.values()),
     'realip': 'RealIP 规则', 'third-party-ncm-sync': '第三方客户端绑定同步', 'donations-api': '官方捐赠与第三方接入',
     'rooms-design': '一起听房间 API 与同步协议', 'network-lines-api': '线路测速',
@@ -176,7 +177,20 @@ def routes(tree):
             if not methods:
                 previous.append(node)
     scan(route.body)
-    return found
+    library_dispatch = next(fn for fn in tree.body if isinstance(fn, ast.FunctionDef) and fn.name == '_library_route')
+    endpoint_map = next(node.value for node in tree.body if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id == '_LIBRARY_ENDPOINTS' for target in node.targets))
+    library_actions = next(node.value for node in tree.body if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id == '_LIBRARY_PLAYLIST_ACTIONS' for target in node.targets))
+    for key in endpoint_map.keys:
+        found[ast.literal_eval(key)] = library_dispatch
+    for key in library_actions.keys:
+        method, suffix = ast.literal_eval(key)
+        found[method, '/library/v2/playlists/{id}' + ('/' + suffix if suffix else '')] = library_dispatch
+    found['GET', '/library/v2/aliases/{id}'] = library_dispatch
+    found['GET', '/library/v2/shared/{id}'] = library_dispatch
+    return {key: node for key, node in found.items()
+            if not key[1].startswith('/share/aggregate/') or key[1].startswith('/share/aggregate/playlist/')}
 
 
 def expression(node):
@@ -371,14 +385,15 @@ def build(output, upstream):
         key = path.strip('/').split('/')[0]
         group = GROUPS.get(key, '平台与其他接口')
         title = titles.get((method,path), GROUPS.get(key,'平台接口') + ' · ' + path)
-        own[group].append(endpoint_text(method,path,node,title,accesses.get((method,path))))
+        access = ('公开分享' if path.startswith('/library/v2/shared/') else 'CurrentMusic Bearer') if path.startswith('/library/v2/') else accesses.get((method,path))
+        own[group].append(endpoint_text(method,path,node,title,access))
         manifest.append(dict(method=method,path='/cm'+path,group=group,line=node.lineno))
     sidebar = ['- **开始接入**', '  - [概览](README.md)', '  - [快速开始](quickstart.md)',
                '  - [认证、错误与请求约定](conventions.md)', '  - [接口完整索引](endpoints.md)', '- **自有后端接口**']
     endpoint_index = ['# 接口完整索引', '', '从实际路由自动构建；路径占位符按各接口业务解释。', '', '| 方法 | 路径 | 分类 |', '| --- | --- | --- |']
     platform_route_groups = {'网易云绑定与同步': 'netease', '酷狗概念版': 'kugou'}
     platform_routes = {}
-    for i,(group,articles) in enumerate(sorted(own.items())):
+    for i,(group,articles) in enumerate(sorted(own.items(), key=lambda entry: (entry[0] == '曲库与聚合歌单', entry[0]))):
         filename = f'backend-{i}.md'
         (output/filename).write_text(f'# {group}\n\n'+ '\n\n'.join(articles))
         if group in platform_route_groups:

@@ -1,3 +1,5 @@
+import { musicPlatform } from '../music-platform.js';
+import { renderKugouDirectory } from './kugou-discover.js';
 // 歌手分类浏览（阶段三新增）：/artist/list 按 类型 / 地区 / 首字母 三个维度筛选 + 分页
 import { api } from '../api.js';
 import { esc, toast, skelGrid } from '../ui.js';
@@ -14,6 +16,7 @@ function loadFilter() {
 }
 
 export async function render(el, params = {}) {
+  if (musicPlatform() === 'kugou') return renderKugouDirectory(el, 'artist');
   const saved = loadFilter();
   const state = { type: params.type ?? saved.type ?? -1, area: params.area ?? saved.area ?? -1, initial: params.initial ?? saved.initial ?? -1 };
 
