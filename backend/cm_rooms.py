@@ -1,6 +1,7 @@
 """听歌房生命周期、成员、队列、权威时间轴和持久事件。"""
 from contextlib import contextmanager
 import json
+import re
 import secrets
 import time
 
@@ -77,6 +78,7 @@ def init_room_tables(conn):
       muted INTEGER DEFAULT 0,
       joined_at INTEGER NOT NULL,
       last_seen INTEGER NOT NULL,
+      media_epoch TEXT NOT NULL DEFAULT '',
       PRIMARY KEY (room_id, user_id)
     );
     CREATE INDEX IF NOT EXISTS idx_rm_user ON room_members(user_id, last_seen DESC);
@@ -84,6 +86,7 @@ def init_room_tables(conn):
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       room_id INTEGER NOT NULL,
       ncm_id INTEGER NOT NULL,
+      kugou_id TEXT NOT NULL DEFAULT '',
       name TEXT NOT NULL,
       artists TEXT DEFAULT '',
       pic TEXT DEFAULT '',
@@ -128,6 +131,17 @@ def init_room_tables(conn):
                 user_id=(SELECT owner_id FROM rooms WHERE id=room_id)""")
             # 旧版 settings 事件可能存过明文密码。保留游标并清空载荷。
             conn.execute("UPDATE room_events SET payload='{}' WHERE type='settings'")
+        if 'kugou_id' not in {row['name'] for row in conn.execute('PRAGMA table_info(room_queue)')}:
+            conn.execute("ALTER TABLE room_queue ADD COLUMN kugou_id TEXT NOT NULL DEFAULT ''")
+        members = {row['name'] for row in conn.execute('PRAGMA table_info(room_members)')}
+        if 'media_epoch' not in members:
+            conn.execute("ALTER TABLE room_members ADD COLUMN media_epoch TEXT NOT NULL DEFAULT ''")
+            conn.execute("UPDATE room_members SET media_epoch=lower(hex(randomblob(16)))")
+        conn.execute("""CREATE TRIGGER IF NOT EXISTS room_members_media_epoch AFTER INSERT ON room_members
+            WHEN NEW.media_epoch='' BEGIN
+                UPDATE room_members SET media_epoch=lower(hex(randomblob(16)))
+                WHERE room_id=NEW.room_id AND user_id=NEW.user_id;
+            END""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rooms_idle ON rooms(closed_at,updated_at)")
 
 
@@ -406,12 +420,24 @@ def queue_list(conn, room_id, uid, role):
 def song_meta(meta):
     if not isinstance(meta, dict):
         raise RoomError(400, "歌曲信息必须为对象")
+    ref = meta.get('trackRef')
+    if ref is not None and (not isinstance(ref, dict) or ref.get('provider') not in ('netease', 'kugou')):
+        raise RoomError(400, '歌曲来源无效')
+    kugou_id = ''
+    if ref and ref['provider'] == 'kugou':
+        kugou_id = ref.get('id', '')
+        if not isinstance(kugou_id, str) or not re.fullmatch(r'[a-f0-9]{32}-[1-9][0-9]{0,14}', kugou_id):
+            raise RoomError(400, '酷狗曲目 ID 无效')
+    ncm_id = 0 if kugou_id else integer(ref.get('id') if ref else meta.get('ncm_id', meta.get('ncmId')),
+                                          '歌曲 ID', minimum=1)
     name = meta.get("name")
-    if not isinstance(name, str) or not name.strip():
+    if kugou_id:
+        name = ""
+    elif not isinstance(name, str) or not name.strip():
         raise RoomError(400, "缺少歌曲名")
     pic = str(meta.get("pic") or "")[:500]
     return {
-        "ncm_id": integer(meta.get("ncm_id", meta.get("ncmId")), "歌曲 ID", minimum=1),
+        "ncm_id": ncm_id, "kugou_id": kugou_id,
         "name": name.strip()[:200], "artists": str(meta.get("artists") or "")[:300],
         "pic": pic if pic.startswith(("https://", "http://")) else "",
         "duration": integer(meta.get("duration") or 0, "歌曲时长"),
@@ -433,8 +459,8 @@ def queue_add(conn, room, member, meta):
         raise RoomError(409, "点歌队列已满")
     auto = bool(room["free_mode"] or not room["need_approval"] or member["role"] in CONTROLLERS)
     status, seq = ("queued", next_seq(conn, room_id)) if auto else ("pending", 0)
-    cur = conn.execute("""INSERT INTO room_queue(room_id,ncm_id,name,artists,pic,duration,
-        requested_by,status,seq,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+    cur = conn.execute("""INSERT INTO room_queue(room_id,ncm_id,kugou_id,name,artists,pic,duration,
+        requested_by,status,seq,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                        (room_id, *meta.values(), member["user_id"], status, seq, int(time.time())))
     emit_event(conn, room_id, "queue", {"action": "add"})
     return dict(meta, id=cur.lastrowid, status=status, seq=seq, requested_by=member["user_id"],
@@ -487,16 +513,28 @@ def position(room, at=None):
     return min(value, duration) if duration > 0 else value
 
 
+def track_ref(room):
+    if room['track_ncm_id']:
+        return {'provider': 'netease', 'id': str(room['track_ncm_id'])}
+    meta = json.loads(room['track_meta'] or 'null') or {}
+    return meta.get('trackRef')
+
+
 def timeline(room):
-    return {
-        "trackNcmId": room["track_ncm_id"],
-        "trackMeta": json.loads(room["track_meta"] or "null"),
-        "trackRevision": room["track_revision"],
-        "stream": {"url": room["stream_url"], "level": room["stream_level"],
-                   "expireAt": room["stream_expire_at"]} if room["stream_url"] else None,
-        "basePosition": room["base_position"], "baseAt": room["base_at"],
-        "playing": bool(room["playing"]), "serverNow": now_ms(),
+    meta = json.loads(room['track_meta'] or 'null')
+    stream = {'url': room['stream_url'], 'level': room['stream_level'],
+              'expireAt': room['stream_expire_at']} if room['stream_url'] else None
+    ref = track_ref(room)
+    if ref and ref['provider'] == 'kugou' and stream:
+        stream = {**stream, 'url': '', 'memberTicket': True}
+    out = {
+        'trackNcmId': room['track_ncm_id'], 'trackMeta': meta, 'trackRevision': room['track_revision'],
+        'stream': stream, 'basePosition': room['base_position'], 'baseAt': room['base_at'],
+        'playing': bool(room['playing']), 'serverNow': now_ms(),
     }
+    if ref and ref['provider'] == 'kugou':
+        out['trackRef'] = ref
+    return out
 
 
 def playback(conn, room, uid, action, changes):
@@ -528,7 +566,9 @@ def switch_track(conn, room, uid, action, item, stream):
     conn.execute("""DELETE FROM room_queue WHERE room_id=? AND status='played' AND id IN
         (SELECT id FROM room_queue WHERE room_id=? AND status='played'
          ORDER BY play_order DESC,id DESC LIMIT -1 OFFSET 50)""", (room_id, room_id))
-    meta = {key: item[key] for key in ("ncm_id", "name", "artists", "pic", "duration")}
+    meta = {key: item[key] for key in ('ncm_id', 'name', 'artists', 'pic', 'duration')}
+    if item.get('kugou_id'):
+        meta['trackRef'] = {'provider': 'kugou', 'id': item['kugou_id']}
     return playback(conn, room, uid, action, dict(
         stream, track_ncm_id=item["ncm_id"], track_meta=json.dumps(meta, ensure_ascii=False),
         track_revision=room["track_revision"] + 1, base_position=0,

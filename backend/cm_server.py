@@ -1484,11 +1484,14 @@ def _member_out(m, decor=""):
 
 
 def _queue_out(item, uid):
-    return {"id": item["id"], "ncmId": item["ncm_id"], "name": item["name"],
-            "artists": item["artists"], "pic": item["pic"], "duration": item["duration"],
-            "status": item["status"], "seq": item["seq"],
-            "requestedBy": item["requested_by"], "requester": item.get("requester", ""),
-            "mine": item["requested_by"] == uid}
+    out = {"id": item["id"], "ncmId": item["ncm_id"], "name": item["name"],
+           "artists": item["artists"], "pic": item["pic"], "duration": item["duration"],
+           "status": item["status"], "seq": item["seq"],
+           "requestedBy": item["requested_by"], "requester": item.get("requester", ""),
+           "mine": item["requested_by"] == uid}
+    if item.get('kugou_id'):
+        out['trackRef'] = {'provider': 'kugou', 'id': item['kugou_id']}
+    return out
 
 
 def _resolve_room_stream(handler, ncm_id, level=""):
@@ -1504,6 +1507,25 @@ def _resolve_room_stream(handler, ncm_id, level=""):
     raise cm_rooms.RoomError(502, "暂时无法获取歌曲音源")
 
 
+def _require_room_kugou_playback(user):
+    if not cm_kugou.playback_enabled():
+        raise cm_rooms.RoomError(503, '此服务暂未开启酷狗房间播放')
+    if not cm_kugou.authorized_user(user):
+        raise cm_rooms.RoomError(403, '当前账号无法播放酷狗音频')
+
+
+def _resolve_room_track(handler, ref, uid, level=''):
+    if ref['provider'] == 'netease':
+        return _resolve_room_stream(handler, int(ref['id']), level) if level else _resolve_room_stream(handler, int(ref['id']))
+    _require_room_kugou_playback(cm_db.get_user(uid))
+    try:
+        result = cm_kugou.resolve(ref['id'], level or 'auto', uid, base_url(handler), room_template=True)
+    except cm_kugou.Error as error:
+        raise cm_rooms.RoomError(error.status, str(error)) from None
+    return {'stream_url': result['url'], 'stream_level': result['quality'],
+            'stream_expire_at': cm_rooms.now_ms() + result['expiresIn'] * 1000}
+
+
 def _room_playback(handler, ident, uid, action, body):
     if action in ("prev", "next"):
         revision = body.get("trackRevision")
@@ -1514,7 +1536,11 @@ def _room_playback(handler, ident, uid, action, body):
             if revision is not None and revision != snapshot["track_revision"]:
                 raise cm_rooms.RoomError(409, "曲目已变化，请重试")
             target = cm_rooms.queue_target(conn, snapshot["id"], action)
-        stream = _resolve_room_stream(handler, target["ncm_id"]) if target else None
+        stream = None
+        if target:
+            ref = ({'provider': 'kugou', 'id': target['kugou_id']} if target.get('kugou_id')
+                   else {'provider': 'netease', 'id': str(target['ncm_id'])})
+            stream = _resolve_room_track(handler, ref, uid)
         with cm_rooms.transaction(write=True) as conn:
             room, _ = cm_rooms.require_room(conn, ident, uid, permission="admin")
             if room["id"] != snapshot["id"] or room["track_revision"] != snapshot["track_revision"] \
@@ -1524,7 +1550,7 @@ def _room_playback(handler, ident, uid, action, body):
 
     with cm_rooms.transaction(write=True) as conn:
         room, _ = cm_rooms.require_room(conn, ident, uid, permission="admin")
-        if not room["track_ncm_id"]:
+        if not cm_rooms.track_ref(room):
             raise cm_rooms.RoomError(409, "当前无曲目，请先选择下一首")
         now = cm_rooms.now_ms()
         pos = cm_rooms.position(room, now)
@@ -1548,11 +1574,14 @@ def _room_playback(handler, ident, uid, action, body):
 def _room_renew(handler, ident, uid):
     with cm_rooms.transaction() as conn:
         snapshot, _ = cm_rooms.require_room(conn, ident, uid, permission="member")
-        if not snapshot["track_ncm_id"]:
-            raise cm_rooms.RoomError(400, "当前无曲目")
-        if snapshot["stream_url"] and snapshot["stream_expire_at"] > cm_rooms.now_ms() + 60_000:
-            return {"timeline": cm_rooms.timeline(snapshot), "seq": cm_rooms.latest_seq(conn, snapshot["id"])}
-    stream = _resolve_room_stream(handler, snapshot["track_ncm_id"], snapshot["stream_level"])
+        ref = cm_rooms.track_ref(snapshot)
+        if not ref:
+            raise cm_rooms.RoomError(400, '当前无曲目')
+        url = snapshot['stream_url']
+        if (url and snapshot['stream_expire_at'] > cm_rooms.now_ms() + 60_000
+                and (ref['provider'] == 'netease' or cm_kugou.room_template_available(url))):
+            return {'timeline': cm_rooms.timeline(snapshot), 'seq': cm_rooms.latest_seq(conn, snapshot['id'])}
+    stream = _resolve_room_track(handler, ref, uid, snapshot['stream_level'])
     with cm_rooms.transaction(write=True) as conn:
         room, _ = cm_rooms.require_room(conn, ident, uid, permission="member")
         if room["id"] != snapshot["id"] or room["track_revision"] != snapshot["track_revision"]:
@@ -1560,6 +1589,40 @@ def _room_renew(handler, ident, uid):
         if room["stream_expire_at"] != snapshot["stream_expire_at"]:
             return {"timeline": cm_rooms.timeline(room), "seq": cm_rooms.latest_seq(conn, room["id"])}
         return cm_rooms.playback(conn, room, uid, "track", stream)
+
+
+def _room_ticket_member(uid, room_id, revision, media_epoch):
+    with cm_rooms.transaction() as conn:
+        try:
+            room, member = cm_rooms.require_room(conn, str(room_id), uid, permission='member')
+        except cm_rooms.RoomError:
+            return False
+        return room['track_revision'] == revision and member['media_epoch'] == media_epoch
+
+
+def _room_member_stream(handler, ident, uid, body):
+    if not isinstance(body, dict):
+        raise cm_rooms.RoomError(400, '请求体需为 JSON 对象')
+    revision = cm_rooms.integer(body.get('trackRevision'), '曲目版本')
+    _require_room_kugou_playback(cm_db.get_user(uid))
+    with cm_rooms.transaction() as conn:
+        room, _ = cm_rooms.require_room(conn, ident, uid, permission='member')
+        if room['track_revision'] != revision:
+            raise cm_rooms.RoomError(409, '曲目已变化，请重试')
+        if (cm_rooms.track_ref(room) or {}).get('provider') != 'kugou':
+            raise cm_rooms.RoomError(409, '当前曲目不使用房间媒体票据')
+    _room_renew(handler, ident, uid)
+    with cm_rooms.transaction() as conn:
+        room, member = cm_rooms.require_room(conn, ident, uid, permission='member')
+        if room['track_revision'] != revision:
+            raise cm_rooms.RoomError(409, '曲目已变化，请重试')
+        try:
+            media = cm_kugou.room_member_media(room['stream_url'], uid, room['id'], revision,
+                                               member['media_epoch'], base_url(handler))
+        except cm_kugou.Error as error:
+            raise cm_rooms.RoomError(error.status, str(error)) from None
+        return {'stream': {'url': media['url'], 'level': room['stream_level'],
+                           'expireAt': cm_rooms.now_ms() + media['expiresIn'] * 1000}, 'trackRevision': revision}
 
 
 def _room_event_feed(handler, user, room_id, since, wait, sse):
@@ -2383,7 +2446,8 @@ def route(handler, method):
     kugou_media = re.fullmatch(r"/kugou/media/([A-Za-z0-9_-]{32})", path)
     if kugou_media and method == "GET":
         try:
-            return cm_kugou.stream(handler, kugou_media[1], lambda uid: cm_kugou.authorized_user(cm_db.get_user(uid)))
+            return cm_kugou.stream(handler, kugou_media[1], lambda uid: cm_kugou.authorized_user(cm_db.get_user(uid)),
+                                   room_authorized=_room_ticket_member)
         except cm_kugou.Error as exc:
             return jresp(handler, exc.status, {"code": exc.code, "error": str(exc)})
 
@@ -3217,6 +3281,7 @@ def route(handler, method):
             ("POST", "/rooms/{id}/next", "房主或房间管理员 Bearer", "播放下一首"),
             ("POST", "/rooms/{id}/prev", "房主或房间管理员 Bearer", "播放上一首"),
             ("POST", "/rooms/{id}/stream/renew", "成员 Bearer", "续签当前音源"),
+            ("POST", "/rooms/{id}/stream/member", "成员 Bearer", "获取本人可用的酷狗房间音源票据"),
             ("GET", "/rooms/{id}/events", "成员 Bearer", "SSE 或长轮询房间事件"),
             ("POST", "/rooms/{id}/sync", "成员 Bearer", "读取服务器时钟与时间轴"),
             ("POST", "/rooms/{id}/heartbeat", "成员 Bearer", "刷新在线状态"),
@@ -5814,6 +5879,11 @@ def route(handler, method):
             u = require_user(handler)
             return jresp(handler, 200, _room_playback(handler, m.group(1), u["id"], action, body))
 
+    m = re.fullmatch(r"/rooms/([0-9]+)/stream/member", path)
+    if m and method == 'POST':
+        u = require_user(handler, allow_query=False)
+        return jresp(handler, 200, _room_member_stream(handler, m[1], u['id'], body), cache_control='no-store')
+
     m = re.fullmatch(r"/rooms/([0-9]+)/stream/renew", path)
     if m and method == "POST":
         u = require_user(handler)
@@ -5829,7 +5899,18 @@ def route(handler, method):
 
     if m and method == "POST":
         u = require_user(handler)
-        meta = cm_rooms.song_meta(body.get("meta", body))
+        if not isinstance(body, dict):
+            raise cm_rooms.RoomError(400, '请求体需为 JSON 对象')
+        meta = cm_rooms.song_meta(body.get('meta', body))
+        if meta['kugou_id']:
+            with cm_rooms.transaction() as conn:
+                cm_rooms.require_room(conn, m[1], u['id'], permission='member')
+            _require_room_kugou_playback(u)
+            try:
+                track, _, _ = cm_kugou.track(meta['kugou_id'])
+            except cm_kugou.Error as error:
+                raise cm_rooms.RoomError(error.status, str(error)) from None
+            meta.update(name=track['name'], artists=track['artists'], pic=track['artwork'], duration=track['durationMs'])
         with cm_rooms.transaction(write=True) as conn:
             room, member = cm_rooms.require_room(conn, m.group(1), u["id"], permission="member")
             item, auto = cm_rooms.queue_add(conn, room, member, meta)

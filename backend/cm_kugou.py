@@ -269,23 +269,56 @@ class Ticket:
     expires: float
     budget: int = 0
     video: bool = False
+    room_template: bool = False
+    room: tuple | None = None
 
 
 _tickets = {}
 _ticket_lock = threading.Lock()
 
 
-def _issue(url, uid, mime="", ttl=_ticket_ttl, *, video=False):
+def _issue(url, uid, mime="", ttl=_ticket_ttl, *, video=False, room_template=False, room=None):
     token = secrets.token_urlsafe(24)
     now = time.monotonic()
     with _ticket_lock:
         for key in [key for key, ticket in _tickets.items() if ticket.expires <= now]:
             del _tickets[key]
+        if room:
+            for existing_token, ticket in _tickets.items():
+                if (ticket.room == room and ticket.uid == uid and ticket.url == url
+                        and abs(ticket.expires - (now + ttl)) < 2):
+                    return existing_token
         if len(_tickets) >= 2048:
             raise Error(503, "kugou_busy", "酷狗播放暂时繁忙")
-        _tickets[token] = Ticket(url, uid, mime, now + ttl, 2 * 1024 * 1024 if not uid else 0, video)
+        _tickets[token] = Ticket(url, uid, mime, now + ttl, 2 * 1024 * 1024 if not uid else 0,
+                                 video, room_template, room)
     return token
 
+
+
+def _room_template(value):
+    token = value.removeprefix('kugou:') if isinstance(value, str) and value.startswith('kugou:') else ''
+    with _ticket_lock:
+        ticket = _tickets.get(token)
+    if ticket and ticket.room_template and ticket.expires > time.monotonic():
+        return ticket
+    return None
+
+
+def room_template_available(value):
+    return _room_template(value) is not None
+
+
+def room_member_media(value, uid, room_id, revision, media_epoch, origin):
+    _https_origin(origin)
+    template = _room_template(value)
+    if not template:
+        raise Error(410, 'kugou_media_expired', '房间音源已过期')
+    ttl = int(template.expires - time.monotonic())
+    if ttl <= 0:
+        raise Error(410, 'kugou_media_expired', '房间音源已过期')
+    token = _issue(template.url, uid, template.mime, ttl, room=(room_id, revision, media_epoch))
+    return {'url': origin + '/cm/kugou/media/' + token, 'expiresIn': ttl}
 
 def _probe(url):
     if not _probe_slots.acquire(blocking=False):
@@ -322,7 +355,7 @@ def _https_origin(origin):
         raise Error(503, "kugou_https_required", "酷狗播放需要 HTTPS 服务地址")
 
 
-def resolve(ident, quality, uid, origin):
+def resolve(ident, quality, uid, origin, *, room_template=False):
     if quality not in ("auto", *_levels):
         raise Error(400, "invalid_input", "不支持的酷狗音质")
     _https_origin(origin)
@@ -358,8 +391,9 @@ def resolve(ident, quality, uid, origin):
                         or (level == "lossless" and codec != "flac") or (level == "exhigh" and bitrate < 160000)):
                     continue
                 file_type, mime = _formats[codec]
-                ticket = _issue(value, uid, mime)
-                return {"url": origin + "/cm/kugou/media/" + ticket, "quality": level, "format": file_type,
+                ticket = _issue(value, uid, mime, room_template=room_template)
+                url = 'kugou:' + ticket if room_template else origin + '/cm/kugou/media/' + ticket
+                return {"url": url, "quality": level, "format": file_type,
                         "bitrate": bitrate, "expiresIn": _ticket_ttl}
     raise Error(403, "playback_unavailable", "酷狗未返回可验证的完整音频")
 
@@ -400,11 +434,15 @@ def _media_size(content_range):
     return 0
 
 
-def stream(handler, token, authorized):
+def stream(handler, token, authorized, room_authorized=None):
     with _ticket_lock:
         ticket = _tickets.get(token)
     if not ticket or ticket.expires <= time.monotonic():
         raise Error(410, "kugou_media_expired", "播放地址已过期，请重新取址")
+    if ticket.room_template:
+        raise Error(404, 'not_found', '播放地址不可用')
+    if ticket.room and (not room_authorized or not room_authorized(ticket.uid, *ticket.room)):
+        raise Error(403, 'room_media_forbidden', '当前试听会话已离开房间或曲目已变化')
     if ticket.uid:
         if not playback_enabled() or not authorized(ticket.uid):
             raise Error(403, "account_access_restricted", "当前账号没有播放权限")

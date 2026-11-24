@@ -149,10 +149,10 @@ export async function openComments({ type = 0, id, title = '', provider = 'netea
               ${icon(liked ? 'thumb_up' : 'thumb_up_off_alt')}<span class="cmt-like-count">${count ? fmtCount(count) : '赞'}</span>
             </button>`}
           </div>
-          ${nested || kugou ? '' : `
+          ${nested || (kugou && !c.replyThread) ? '' : `
             <button type="button" class="cmt-action cmt-floor-btn" data-action="floor" data-count="${replies}"
               aria-expanded="false" aria-controls="floor-${esc(c.id)}" ${replies ? '' : 'hidden'}>${icon('expand_more')}<span class="cmt-floor-label">展开 ${fmtCount(replies)} 条回复</span></button>
-            <div class="cmt-floor" id="floor-${esc(c.id)}" data-parent="${esc(c.id)}" hidden>
+            <div class="cmt-floor" id="floor-${esc(c.id)}" data-parent="${esc(c.id)}" data-thread="${esc(c.replyThread || '')}" hidden>
               <div class="cmt-floor-items"></div>
               <div class="cmt-floor-status" role="status"></div>
               <button type="button" class="cmt-action cmt-floor-more" data-action="floor-more" hidden></button>
@@ -227,7 +227,7 @@ export async function openComments({ type = 0, id, title = '', provider = 'netea
   async function loadFloor(floor) {
     let state = floors.get(floor);
     if (!state) {
-      state = { seen: new Set(), cursor: null, more: true, pending: false };
+      state = { seen: new Set(), page: 1, cursor: null, more: true, pending: false };
       floors.set(floor, state);
       floor.querySelector('.cmt-floor-items').innerHTML = '';
     }
@@ -239,11 +239,14 @@ export async function openComments({ type = 0, id, title = '', provider = 'netea
     note.textContent = '正在加载回复…';
     button.hidden = true;
     try {
-      const data = await api.commentReplies({ ...resource, commentId: floor.dataset.parent,
+      const data = kugou ? await kugouRequest('track.comment.replies', {
+        id, commentId: floor.dataset.parent, replyThread: floor.dataset.thread, page: state.page,
+      }) : await api.commentReplies({ ...resource, commentId: floor.dataset.parent,
         ...(state.cursor ? { cursor: state.cursor } : {}) });
       if (!isCurrent()) return;
       if (!kugou) updateComposer(data.meUid);
       appendRows(floor.querySelector('.cmt-floor-items'), data.comments, state.seen, true);
+      state.page += 1;
       state.cursor = data.nextCursor;
       state.more = data.more;
       note.textContent = state.seen.size ? '' : '暂无回复';
