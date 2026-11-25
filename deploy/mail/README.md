@@ -31,3 +31,17 @@ servers over TCP 25. Use a separate transport for bulk notifications.
    receiving provider's authentication results and the Exim delivery log.
    SMTP acceptance by local Exim indicates that the message entered the
    queue. The receiving provider's reply confirms external handoff.
+
+## Personal Outlook.com as the SMTP provider
+
+1. Register an Entra application that supports personal Microsoft accounts.
+   Under Authentication, enable public client flows for device login. Use
+   delegated Exchange Online `SMTP.Send` permission.
+2. Run `python3 tools/configure-outlook-smtp.py CLIENT_ID /etc/currentmusic/outlook-smtp.json`
+   as the backend service user. Complete the device login and consent on
+   Microsoft's website. The file and its directory must be writable by the
+   backend service user so it can rotate the refresh token.
+3. Set `CM_SMTP_USER` to the Outlook mailbox address and
+   `CM_SMTP_OUTLOOK_TOKEN_FILE` to the credential file in the backend's protected
+   environment. The backend uses `smtp-mail.outlook.com:587` with STARTTLS and
+   OAuth2. Keep the credential file and its lock outside public paths and Git.

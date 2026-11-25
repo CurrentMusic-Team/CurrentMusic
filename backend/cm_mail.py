@@ -1,6 +1,6 @@
 """通过带 TLS 的 SMTP 发送邮件。
 
-凭据经环境变量 CM_SMTP_USER / CM_SMTP_PASS 注入（systemd unit），
+凭据经 systemd 环境文件或受保护的 Outlook OAuth 文件注入，
 仓库内不落任何密钥。
 """
 from contextlib import contextmanager
@@ -13,6 +13,8 @@ from email.mime.text import MIMEText
 from email.utils import formataddr, formatdate, make_msgid
 from html import escape
 
+import cm_mail_outlook
+
 log = logging.getLogger("cm")
 
 SMTP_HOST = "smtp.qq.com"
@@ -22,34 +24,38 @@ ENGINE_URL = "https://music.20110208.xyz/home/engine/"
 def _cfg():
     user = os.environ.get("CM_SMTP_USER", "")
     pwd = os.environ.get("CM_SMTP_PASS", "")
-    if not user or not pwd:
-        return None, None
-    return user, pwd
+    outlook_token_file = os.environ.get("CM_SMTP_OUTLOOK_TOKEN_FILE", "")
+    return user, pwd, outlook_token_file
 
 
 def smtp_ready():
-    u, p = _cfg()
-    return bool(u and p)
+    user, password, outlook_token_file = _cfg()
+    return bool(user and (password or outlook_token_file))
 
 
 @contextmanager
 def smtp_connection():
-    user, password = _cfg()
-    if not user or not password:
+    user, password, outlook_token_file = _cfg()
+    if not user or not (password or outlook_token_file):
         raise RuntimeError("SMTP 未配置")
 
-    host = os.environ.get("CM_SMTP_HOST") or SMTP_HOST
-    security = os.environ.get("CM_SMTP_SECURITY") or "ssl"
-    if security not in ("ssl", "starttls"):
-        raise smtplib.SMTPException("CM_SMTP_SECURITY 必须为 ssl 或 starttls")
-    try:
-        port = int(os.environ.get("CM_SMTP_PORT") or (465 if security == "ssl" else 587))
-        if not 1 <= port <= 65535:
-            raise ValueError
-    except ValueError:
-        raise smtplib.SMTPException("CM_SMTP_PORT 必须为 1 至 65535 的整数") from None
+    if outlook_token_file:
+        host, security, port = cm_mail_outlook.SMTP_HOST, "starttls", 587
+        ca_file = None
+    else:
+        host = os.environ.get("CM_SMTP_HOST") or SMTP_HOST
+        security = os.environ.get("CM_SMTP_SECURITY") or "ssl"
+        if security not in ("ssl", "starttls"):
+            raise smtplib.SMTPException("CM_SMTP_SECURITY 必须为 ssl 或 starttls")
+        try:
+            port = int(os.environ.get("CM_SMTP_PORT") or (465 if security == "ssl" else 587))
+            if not 1 <= port <= 65535:
+                raise ValueError
+        except ValueError:
+            raise smtplib.SMTPException("CM_SMTP_PORT 必须为 1 至 65535 的整数") from None
+        ca_file = os.environ.get("CM_SMTP_CA_FILE") or None
     sender = os.environ.get("CM_SMTP_FROM") or user
-    context = ssl.create_default_context(cafile=os.environ.get("CM_SMTP_CA_FILE") or None)
+    context = ssl.create_default_context(cafile=ca_file)
     if security == "ssl":
         smtp = smtplib.SMTP_SSL(host, port, timeout=15, context=context)
     else:
@@ -57,7 +63,10 @@ def smtp_connection():
     with smtp:
         if security == "starttls":
             smtp.starttls(context=context)
-        smtp.login(user, password)
+        if outlook_token_file:
+            cm_mail_outlook.authenticate(smtp, user, outlook_token_file)
+        else:
+            smtp.login(user, password)
         yield smtp, sender
 
 
