@@ -94,6 +94,7 @@ python3 backend/cm_server.py
 | `CM_SMTP_PORT` | `ssl` 为 `465`，`starttls` 为 `587` | SMTP 端口，可按邮件服务商要求覆盖 |
 | `CM_SMTP_CA_FILE` | 系统 CA | 使用私有证书时可指定受信任的 PEM 文件，仍校验 SMTP 主机名 |
 | `CM_SMTP_FROM` | `CM_SMTP_USER` | SMTP 服务商已验证的发件地址。登录名与发件地址不同时必填 |
+| `CM_SMTP_OUTLOOK_TOKEN_FILE` | 空 | 个人 Outlook.com 的 OAuth 授权文件。设置后使用 Outlook STARTTLS 和 OAuth2 |
 | `CM_SMS_WEBHOOK/TOKEN/SIGN` | 空 | 短信验证码 |
 | `CM_CAST_CACHE` | `<CM_DATA_DIR>/cast` | 投屏音频缓存 |
 | `CM_SHARE_DIR` | `<CM_DATA_DIR>/share` | 分享图缓存 |
