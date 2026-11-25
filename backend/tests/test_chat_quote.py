@@ -87,6 +87,26 @@ class TestChatQuoteAndMentionAll(unittest.TestCase):
         m2 = cm_chat.send(self.user2, "普通发言", "", [])
         self.assertFalse(m2["mentionAll"])
 
+    def test_public_members_and_old_events_exclude_login_identifiers(self):
+        cm_db.update_profile(self.uid, {"nickname": self.user["username"]})
+        alias = f"用户#{self.uid}"
+        self.assertEqual(cm_chat.search_members(self.user["username"]), [])
+        member, = cm_chat.search_members(alias)
+        self.assertNotIn("username", member)
+
+        sent = cm_chat.send(self.user, "测试消息", "", [self.other])
+        self.assertEqual(sent["user"]["nickname"], alias)
+        self.assertNotIn("username", sent["user"])
+        self.assertNotIn("username", sent["mentions"][0])
+
+        seq = cm_chat.latest_seq()
+        cm_chat.emit("message", {"user": {"id": self.uid, "nickname": self.user["username"],
+                                          "username": self.user["username"]},
+                                 "mentions": [], "quote": {"userId": self.uid, "nickname": self.user["username"]}})
+        replay = cm_chat.events_since(seq)[0]["payload"]
+        self.assertEqual(replay["user"], {"id": self.uid, "nickname": alias})
+        self.assertEqual(replay["quote"]["nickname"], alias)
+
     def test_ai_streaming_send_keeps_default_fields(self):
         # AI 占位消息走 streaming=True：不应带引用/全体标记
         m = cm_chat.send(self.user, "", "", [], [], streaming=True)

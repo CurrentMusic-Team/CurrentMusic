@@ -6,6 +6,7 @@
 import json
 import logging
 import hashlib
+import hmac
 import sqlite3
 import os
 import re
@@ -386,7 +387,8 @@ def _share_local_playlist(pid):
     return {
         "name": pl.get("name") or "",
         "pic": pl.get("cover") or "",
-        "owner": owner.get("nickname") or owner.get("username") or "",
+        "owner": cm_db.public_nickname(owner.get("id"), owner.get("nickname"), owner.get("username"),
+                                      owner.get("phone"), owner.get("is_bot")) or "",
         "description": (pl.get("description") or "")[:200],
         "trackCount": count,
     }
@@ -1296,7 +1298,9 @@ def cast_resolve(ncm_id, level=None, allow_downgrade=True):
 
 def jresp(handler, code, obj, cache_control=None, extra_headers=None):
     path = urlparse(handler.path).path
-    if path.startswith(("/auth/passkeys", "/auth/2fa/", "/auth/security-question")) or (isinstance(obj, dict) and (obj.get("requires2FA") or obj.get("requiresSecurityQuestion"))):
+    if (path.rstrip("/") in ("/auth/login", "/auth/internal")
+            or path.startswith(("/auth/passkeys", "/auth/2fa/", "/auth/security-question"))
+            or (isinstance(obj, dict) and (obj.get("requires2FA") or obj.get("requiresSecurityQuestion")))):
         cache_control = "no-store"
     if path == "/audio-sources" or path.startswith("/audio-sources/"):
         cache_control = "no-store"
@@ -2645,7 +2649,7 @@ def route(handler, method):
         out = [{
             "id": a["id"], "title": a["title"], "body": a["body"], "link": a["link"],
             "pinned": bool(a["pinned"]), "createdAt": a["createdAt"], "updatedAt": a["updatedAt"],
-            "author": a.get("author_nickname") or a.get("author_username") or "",
+            "author": a.get("author_nickname") or "",
         } for a in items]
         return jresp(handler, 200, {"items": out, "count": len(out)})
 
@@ -2918,8 +2922,13 @@ def route(handler, method):
         expect = os.environ.get("CM_INTERNAL_PASS", "")
         if not expect:
             raise ApiError(503, "内部登录未启用")
-        if pw != expect:
+        try:
+            attempt_id = cm_db.reserve_password_attempt("internal")
+        except cm_db.PasswordLoginLimited as e:
+            return jresp(handler, 429, {"error": str(e)}, extra_headers={"Retry-After": str(e.retry_after)})
+        if not hmac.compare_digest(pw.encode(), expect.encode()):
             raise ApiError(401, "内部密码错误")
+        cm_db.finish_password_attempt(attempt_id)
         u = cm_db.get_user_by_name("__internal__")
         if not u:
             uid = cm_db.create_user("__internal__", secrets.token_hex(16), "内部账户", "__internal__@local")
@@ -2940,6 +2949,8 @@ def route(handler, method):
         password = str(body.get("password") or "")
         try:
             u = cm_db.verify_login(username, password)
+        except cm_db.PasswordLoginLimited as e:
+            return jresp(handler, 429, {"error": str(e)}, extra_headers={"Retry-After": str(e.retry_after)})
         except PermissionError as e:
             raise ApiError(403, str(e))
         if not u:
@@ -3245,7 +3256,7 @@ def route(handler, method):
             ("POST", "/auth/2fa/enable", "Bearer", "校验 {code} 后开启 TOTP；返回仅显示一次的 10 枚 recoveryCodes，下线其他设备"),
             ("POST", "/auth/2fa/disable", "Bearer", "{password, code}：当前密码 + 验证器验证码或恢复码关闭两步验证，下线其他设备"),
             ("POST", "/auth/2fa/login", "公开", "{challengeToken, code}：完成第二步登录，返回 {token, user}；5 分钟有效，失败每账号 5 次/5 分钟"),
-            ("POST", "/auth/login", "公开", "登录 Current 账户；开启验证器 2FA 或密保时先返回验证挑战（requires2FA 或 requiresSecurityQuestion、challengeToken、expiresIn），不会签发会话"),
+            ("POST", "/auth/login", "公开", "用户名或绑定手机号登录；同一账户 15 分钟内最多 5 次密码失败，之后返回 429 和 Retry-After。开启 2FA 或密保时先返回验证挑战（requires2FA 或 requiresSecurityQuestion、challengeToken、expiresIn）"),
             ("POST", "/auth/logout", "Bearer", "退出当前设备并撤销会话"),
             ("GET", "/auth/me", "Bearer", "当前账户资料与统计（含 bannerUrl、累计积分 points 和等级 level）"),
             ("GET", "/profile", "Bearer", "当前账户资料与统计（bannerUrl 为 API 基址相对路径，空串表示未设置）"),
@@ -3306,7 +3317,7 @@ def route(handler, method):
             ("POST", "/admin/users/{id}/title", "管理员", "设置 / 清空用户头衔（''=清空；普通管理员不能改超管）"),
             ("POST", "/admin/users/{id}/super", "超管", "设置 / 取消超级管理员（仅超管/站长，至少保留一位）"),
             ("POST", "/admin/users/{id}/owner", "站长", "设置 / 取消站长（最高角色，仅站长，至少保留一位）"),
-            ("GET", "/users/square", "公开", "用户发现广场（含 level、ipRegion）；sort 默认 composite，新增 active、level"),
+            ("GET", "/users/square", "公开", "用户发现广场（含公开昵称、level、ipRegion）；仅按公开昵称和个签查询。sort 默认 composite，支持 active、level"),
             ("GET", "/levels/rules", "公开", "活跃积分、等级门槛与试炼规则"),
             ("GET", "/donation/qr", "公开", "官方捐赠二维码图片（backend/assets/donation-qr.jpg，可缓存）"),
             ("GET", "/donation/info", "Bearer", "捐赠引导信息：账号基本信息快照、二维码地址、本人捐赠历史与累计 {mine:{items,count,totalCents}}"),
@@ -3344,12 +3355,12 @@ def route(handler, method):
             ("GET", "/ncm/comments/replies", "公开 / 可选 Bearer", "按 commentId 懒加载回复，nextCursor 向后翻页；不重复返回父评论"),
             ("POST", "/ncm/comment", "Bearer + 网易云绑定", "JSON {id,type,t,commentId?,content?,threadId?,confirm:1}；t=1 发评、2 回复、0 删除"),
             ("POST", "/ncm/comment/like", "Bearer + 网易云绑定", "JSON {id,type,cid,t,threadId?,confirm:1}；t=1 点赞、0 取消"),
-            ("GET", "/chat/messages", "公开", "公共聊天室：最近消息（含 atts 引用卡片；?before=<id> 向更早翻页，?limit=1~50）"),
+            ("GET", "/chat/messages", "公开", "公共聊天室：最近消息，发送者与被提及者使用公开昵称和用户 ID（?before=<id> 向更早翻页，?limit=1~50）"),
             ("POST", "/chat/messages", "Bearer", "发送消息 {content≤500字, image?: 图片文件名, mentions?: [@用户id], atts?: [{type: song|album|artist|playlist, id, name, sub?, pic?}]≤5, quoteId?: 引用消息id（须存在且未删，摘要读取时实时生成）, mentionAll?: @全体成员（仅管理员，且 content 须含 @全体成员）}（1.5s 频控）。**@CurrentMusicAI 可提问（卡片可选）；按用户保存近 6 轮上下文，服务端异步联网检索后以 AI 账号回复：先发空消息占位，再经 /chat/live 的 edit 事件流式更新（streaming=true），最终内容为 Markdown，可带 ≤3 张 atts 卡片；消息带 image 时图片会作为视觉输入发送给 AI**"),
             ("DELETE", "/chat/messages/{id}", "Bearer", "删除消息（本人或管理员/超管/站长，软删）"),
             ("POST", "/chat/image", "Bearer", "上传聊天图片 {file: base64, filename, contentType}（魔法字节校验，≤1.5MB，5s 频控）"),
             ("GET", "/chat/image/{file}", "公开", "聊天图片直链"),
-            ("GET", "/chat/members", "公开", "聊天成员：?q= 实时搜索昵称/用户名（@ 提及选择器，最多 20，前缀命中优先；无 q 返回近期活跃；尊重广场公开开关，AI 账号始终可搜到）"),
+            ("GET", "/chat/members", "公开", "聊天成员：?q= 实时搜索公开昵称（@ 提及使用用户 ID；无 q 返回近期活跃；尊重广场公开开关，AI 账号始终可搜到）"),
             ("GET", "/chat/live", "公开", "聊天实时流：?sse=1 走 SSE（message/delete/edit 事件，id=seq 断线续传；edit.payload={id,content,atts,streaming}，AI 流式回答用同一 id 反复更新）；不带则返回 JSON 增量"),
             ("POST", "/ai/live", "Bearer", "播放页「问AI」：SSE（start/delta/done/error）流式回答 {question≤500字, song:{type:'song',id,name,sub?,pic?}, reset?:bool}；delta.text 为累计文本；scope=player 与公共 Chat 隔离，reset=true 先清空播放页上下文"),
             ("GET", "/users/{id}/profile", "公开", "公开用户主页（含 user.bannerUrl 和 user.ipRegion）"),
@@ -5695,7 +5706,7 @@ def route(handler, method):
                                         "latestSeq": cm_chat.latest_seq()})
         handler.send_response(200)
         handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("Cache-Control", "no-store")
         handler.send_header("Access-Control-Allow-Origin", "*")
         handler.send_header("X-Accel-Buffering", "no")     # 让 nginx 不缓冲
         handler.end_headers()

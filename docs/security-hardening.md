@@ -68,8 +68,9 @@ Pillow 升到 12.3+（本机系统包当前无该版本，需单独打包/venv�
    此前分享图对用户可控的 `pic` 直接 `urlopen`，可访问本机/云元数据地址。
 2. **图片解压炸弹**：新增 `backend/cm_image.py`，统一格式白名单 + 像素上限，
    头像、分享封面、聊天图片送 AI 前均走该入口；头像超限直接 400。
-3. **认证限速**：登录/注册/邮箱/短信验证码入口单独 30 次/分钟/IP，避免撞库
-   只受全站 300/min 限制。
+3. **认证限速**：登录、注册及验证码入口按客户端 IP 限制为 30 次/分钟。密码登录另按账号持久化计数，
+   同一账号在滚动 15 分钟内最多失败 5 次，用户名和绑定手机号共用额度。Cloudflare 访客 IP 由
+   nginx 按可信网段还原。详见 [密码接口](password-api.md) 与 [RealIP](realip.md)。
 4. **安全响应头**：后端所有响应统一加 nosniff / SAMEORIGIN / Referrer-Policy /
    Permissions-Policy；nginx 静态 `/app/` 同步补齐。
 5. **图片代理响应**：`/cm/img` 校验 `Content-Type` 必须为 `image/*`，加 nosniff。

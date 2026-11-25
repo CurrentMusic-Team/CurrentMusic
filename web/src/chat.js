@@ -102,8 +102,6 @@ function msgHTML(m) {
       <div class="cm-chatp-head">
         <span class="cm-chatp-nick" data-uid="${m.user ? m.user.id : 0}">${m.user ? esc(m.user.nickname) : '已注销用户'}</span>
         ${m.user ? userTags(m.user) : ''}
-        ${m.user && m.user.username && m.user.username !== m.user.nickname
-          ? `<span class="cm-chatp-un">@${esc(m.user.username)}</span>` : ''}
         <span class="cm-chatp-time">${fmtTime(m.createdAt)}</span>
         ${auth.token ? `<span class="cm-chatp-qt material-icons-outlined" data-qt="${m.id}" title="引用这条消息">format_quote</span>` : ''}
         ${mine ? `<span class="cm-chatp-del material-icons-outlined" data-del="${m.id}" title="删除">delete</span>` : ''}
@@ -359,7 +357,7 @@ export async function mountChat(box) {
 
   const aiMentioned = () => {
     for (const u of pickedMentions.values()) {
-      if (u.isBot || u.username === AI_USERNAME) return true;
+      if (u.isBot) return true;
     }
     return new RegExp('@\\s*' + AI_USERNAME + '\\b').test(input.value);
   };
@@ -430,7 +428,7 @@ export async function mountChat(box) {
         ${avatarHTML(u, 28)}
         <span class="cm-chatp-pk-t">
           <span class="cm-chatp-pk-n">${hl(u.nickname, q)}${userTags(u)}</span>
-          <span class="cm-chatp-pk-u">@${esc(u.username || '')}</span>
+          <span class="cm-chatp-pk-u">#${esc(u.id)}</span>
         </span>
       </button>`).join('');
     pickerOpen = true;

@@ -5,6 +5,9 @@ server {
     http2 on;
     server_name music.example.com;
 
+    # For a Cloudflare-proxied site, install and enable the trusted peer allowlist.
+    # include /etc/nginx/snippets/currentmusic-cloudflare-realip.conf;
+
     # ssl_certificate     /etc/letsencrypt/live/music.example.com/fullchain.pem;
     # ssl_certificate_key /etc/letsencrypt/live/music.example.com/privkey.pem;
 

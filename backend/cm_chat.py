@@ -166,12 +166,13 @@ def _throttled(uid, kind, interval):
 
 # ---------------------------------------------------------------- 消息
 
-_USER_FIELDS = "u.id, u.username, u.nickname, u.avatar, u.title, u.avatar_decoration, u.is_admin, u.is_super, u.is_owner, u.is_bot"
+_USER_FIELDS = (f"u.id, {cm_db.PUBLIC_NICKNAME} AS nickname, u.avatar, u.title, u.avatar_decoration, "
+                "u.is_admin, u.is_super, u.is_owner, u.is_bot")
 
 
 def _user_out(u):
     u = dict(u)          # sqlite3.Row 没有 .get()，统一转 dict
-    return {"id": u["id"], "username": u["username"], "nickname": u["nickname"],
+    return {"id": u["id"], "nickname": u["nickname"],
             "avatar": u["avatar"] or "", "avatarDecoration": u["avatar_decoration"] or "",
             "title": u["title"] or "",
             "isAdmin": bool(u["is_admin"]), "isSuper": bool(u["is_super"]),
@@ -226,7 +227,7 @@ def quotes_out(conn, ids):
     ids = sorted(uniq)
     ph = ",".join("?" * len(ids))
     rows = conn.execute(
-        f"""SELECT m.id, m.user_id, m.content, m.image, m.atts, u.nickname
+        f"""SELECT m.id, m.user_id, m.content, m.image, m.atts, {cm_db.PUBLIC_NICKNAME} AS nickname
             FROM chat_messages m LEFT JOIN users u ON u.id = m.user_id
             WHERE m.id IN ({ph})""", ids).fetchall()
     return {r["id"]: _quote_summary(r) for r in rows}
@@ -293,6 +294,7 @@ def send(user, content, image, mentions, atts=None, quote=0, mention_all=False, 
             tuple(mentions)) if mentions else []
         mops = [dict(m) for m in mrows]     # Row 绑定连接，必须在 close 前转 dict
         qout = quotes_out(conn, [quote]) if quote else {}
+        sender = conn.execute(f"SELECT {_USER_FIELDS} FROM users u WHERE u.id=?", (user["id"],)).fetchone()
         conn.commit()
     finally:
         conn.close()
@@ -300,10 +302,7 @@ def send(user, content, image, mentions, atts=None, quote=0, mention_all=False, 
                     "image": image or "", "atts": json.dumps(atts or [], ensure_ascii=False),
                     "quote": int(quote or 0), "mention_all": 1 if mention_all else 0,
                     "created_at": int(time.time())},
-                   {k: user.get(k) for k in
-                    ("id", "username", "nickname", "avatar", "avatar_decoration",
-                     "title", "is_admin", "is_super", "is_owner", "is_bot")},
-                   mops, streaming, quote=qout.get(int(quote or 0)))
+                   sender, mops, streaming, quote=qout.get(int(quote or 0)))
     emit("message", out)
     return out
 
@@ -369,7 +368,7 @@ def like_pattern(query, prefix_only=False):
 
 
 def search_members(query, limit=8):
-    """@ 提及实时搜索：昵称/用户名模糊匹配（前缀命中优先，其次新注册）。
+    """@ 提及实时搜索：公开昵称模糊匹配（前缀命中优先，其次新注册）。
 
     只搜「公开到广场」的启用用户（尊重 public_square=0），与 recent_members 同一口径。
     """
@@ -382,11 +381,11 @@ def search_members(query, limit=8):
         rows = conn.execute(
             f"""SELECT {_USER_FIELDS} FROM users u
                 WHERE u.disabled=0 AND (u.public_square=1 OR u.is_bot=1) AND u.username!='__internal__'
-                  AND (u.nickname LIKE ? ESCAPE '\\' OR u.username LIKE ? ESCAPE '\\')
-                ORDER BY CASE WHEN u.nickname LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END,
+                  AND {cm_db.PUBLIC_NICKNAME} LIKE ? ESCAPE '\\'
+                ORDER BY CASE WHEN {cm_db.PUBLIC_NICKNAME} LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END,
                          u.id DESC
                 LIMIT ?""",
-            (like_pattern(q), like_pattern(q), like_pattern(q, prefix_only=True), limit),
+            (like_pattern(q), like_pattern(q, prefix_only=True), limit),
         ).fetchall()
         return [_user_out(r) for r in rows]
     finally:
@@ -456,13 +455,34 @@ def events_since(since_seq, limit=50):
         out = []
         for r in rows:
             try:
-                out.append({"seq": r["seq"], "type": r["type"],
-                            "payload": json.loads(r["payload"]), "createdAt": r["created_at"]})
+                payload = json.loads(r["payload"])
             except ValueError:
                 continue
+            if r["type"] == "message":
+                _redact_legacy_event(conn, payload)
+            out.append({"seq": r["seq"], "type": r["type"], "payload": payload, "createdAt": r["created_at"]})
         return out
     finally:
         conn.close()
+
+
+def _redact_legacy_event(conn, payload):
+    """旧事件可能仍在 SSE 回放窗口中，读取时移除旧版公开账号字段。"""
+    actors = [payload.get("user"), *payload.get("mentions", [])]
+    if not any(actor and "username" in actor for actor in actors):
+        return
+    for actor in actors:
+        if actor:
+            username = actor.pop("username", "")
+            row = conn.execute("SELECT phone FROM users WHERE id=?", (actor["id"],)).fetchone()
+            actor["nickname"] = cm_db.public_nickname(
+                actor["id"], actor["nickname"] if row else "", username, row["phone"] if row else "",
+                actor.get("isBot", False),
+            )
+    quote = payload.get("quote")
+    if quote:
+        row = conn.execute(f"SELECT {cm_db.PUBLIC_NICKNAME} FROM users u WHERE id=?", (quote["userId"],)).fetchone()
+        quote["nickname"] = row[0] if row else "已注销用户"
 
 
 # ---------------------------------------------------------------- 图片

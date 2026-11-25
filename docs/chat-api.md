@@ -11,7 +11,7 @@
 | DELETE | `/chat/messages/{id}` | 登录。本人或管理员软删除，返回 `{ok:true}`；SSE 广播 `delete` 事件。 |
 | POST | `/chat/image` | 登录。`{file: <base64>, filename, contentType}`，返回 `{image, url}`；解码后 ≤1.5MB，魔法字节校验 jpg/png/gif/webp。同一用户两次传图至少间隔 5 秒（429）。 |
 | GET | `/chat/image/{file}` | 公开。聊天图片直链，缓存 7 天。 |
-| GET | `/chat/members` | 公开。`?q=` 昵称/用户名模糊搜索（@ 提及选择器用，最多 8 条）；不带 `q` 返回近 7 天活跃成员（不足用最新注册补齐）。只返回「公开到广场」的启用用户。 |
+| GET | `/chat/members` | 公开。`?q=` 按公开昵称模糊搜索（@ 提及选择器默认 8 条）；不带 `q` 返回近 7 天活跃成员（不足用最新注册补齐）。只返回「公开到广场」的启用用户及 AI 助手。 |
 | GET | `/chat/live` | 公开。`?since=<seq>` 增量；`?sse=1` 升级为 SSE 流（建议经 `/cm/live/chat` 无缓冲命名空间）。 |
 
 ## 发言（POST /chat/messages）
@@ -36,7 +36,7 @@
   "id": 128, "userId": 42, "content": "@全体成员 周五晚八点一起听歌",
   "image": "", "atts": [],
   "createdAt": 1760000000,
-  "user": {"id": 42, "username": "alice", "nickname": "爱丽丝", "avatar": "...",
+  "user": {"id": 42, "nickname": "爱丽丝", "avatar": "...",
            "avatarDecoration": "", "title": "", "isAdmin": true, "isSuper": false,
            "isOwner": false, "isBot": false},
   "mentions": [],
@@ -46,7 +46,7 @@
 }
 ```
 
-- `mentions` 为被 @ 者的完整用户对象列表（与 `user` 同构），读取时按 id 关联——用户改昵称后历史消息依然正确。
+- `mentions` 为被 @ 者的公开用户对象列表（与 `user` 和 `/chat/members` 的成员项同构）。通过 `id` 识别用户和处理提及，`nickname` 用于展示。与登录名或绑定手机号相同的昵称会在公开资料中显示为 `用户#<id>`。
 - `quote` 为引用摘要，**读取时从原消息实时生成**，不冗余存储：
   - `excerpt` 规则：正文优先（超 100 字截断加 `…`）；纯图片消息为 `[图片]`；纯卡片消息为 `[引用] <卡片名>`；其余为 `[消息]`。
   - 原消息被删除（软删）后，已发出的引用仍能显示摘要；被环形清理淘汰（仅保留最近 500 条）后 `quote` 为 `null`，客户端应按无引用渲染。

@@ -122,14 +122,9 @@ def client_ip(handler) -> str:
          把真实对端追加在末尾（首值可能是调用方自己写的，不能信）；
       3. 兜底 ``client_address[0]``。
 
-    旧实现取 CF-Connecting-IP → XFF **首值**：CF 关闭的部署下这两个头无人覆盖、
-    可被调用方伪造（实测伪造 XFF 首值即可让上游按任意 IP 挑边缘、绕过按 IP 的
-    限速桶）。v1.28.24 起与 :func:`rate_key` 并入同一实现。
-
-    ⚠️ ``CF-Connecting-IP`` **刻意不在链上**：只有 Cloudflare 在前时它才被 CF 覆盖
-    写入、可信；CF 关闭时它只是个原样透传的普通请求头，放进链条就等于留了个
-    伪造后门。若将来重开 Cloudflare：把它加回第 1 位，**同时**注意 X-Real-IP 会
-    变成 CF 边缘节点的 IP（nginx 看到的对端是 CF），需要一并调整。
+    Cloudflare 部署由 nginx 的 realip 模块校验连接来源，在可信的 IPv4 或 IPv6 网段内
+    才用 ``CF-Connecting-IP`` 还原 ``$remote_addr``，再覆盖写入 ``X-Real-IP``。
+    后端保持只监听回环地址，代理头由本机反代提供。
     """
     ip = (handler.headers.get("X-Real-IP") or "").strip()
     if ip:

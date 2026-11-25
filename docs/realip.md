@@ -11,6 +11,11 @@ CurrentMusic 代理网易云接口时，默认以服务器 IP 请求上游。某
 2. `X-Forwarded-For` 的最后一跳（nginx 追加）；
 3. TCP `client_address`。
 
+Cloudflare 位于 nginx 前时，在站点的 `server` 块启用 `deploy/nginx-cloudflare-realip.conf.example` 配置模板。
+nginx 只对 Cloudflare 公布的 IPv4 和 IPv6 网段采信 `CF-Connecting-IP`，将还原后的 `$remote_addr`
+写入 `X-Real-IP`。直连请求继续使用 TCP 对端地址。部署时核对 [Cloudflare 官方网段](https://www.cloudflare.com/ips/)，
+刷新列表后运行 `nginx -t` 并重载。源站后端的 3010 端口只监听回环地址。
+
 实现见 `backend/cm_ncm_gateway.py::client_ip()`。网关的
 `normalize_params()` 会把客户端提交的 `realIP` 当作保留参数剥离，之后再由服务端注入。
 
