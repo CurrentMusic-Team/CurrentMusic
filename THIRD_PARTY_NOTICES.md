@@ -10,6 +10,14 @@
   this repository)
 - Configuration: `deploy/gatus/config.yaml` (declarative endpoint list)
 
+## Exim (optional, separate installation)
+
+- Project https://www.exim.org/. Debian's Exim package uses **GPL-2.0-or-later**
+  with an OpenSSL linking exception. The package provides its license and
+  third-party notices in `/usr/share/doc/exim4-daemon-light/copyright`.
+- CurrentMusic connects to the separately installed service over SMTP. The
+  repository includes the service configuration under `deploy/mail/`.
+
 ## LDDC (optional, separate installation)
 
 - Project: https://github.com/chenmozhijin/LDDC

@@ -1,0 +1,83 @@
+# Replace the domain with the sending hostname and publish its mail DNS records.
+MAIL_DOMAIN = mail.example.com
+MAIL_ROOT = /etc/currentmusic-mail
+MAIL_FROM = verify@MAIL_DOMAIN
+
+primary_hostname = MAIL_DOMAIN
+local_interfaces = 127.0.0.1
+daemon_smtp_ports = 1587
+disable_ipv6 = true
+spool_directory = /var/lib/currentmusic-mail
+pid_file_path = /run/currentmusic-mail/exim.pid
+log_file_path = syslog
+keep_environment =
+message_size_limit = 128K
+recipients_max = 1
+recipients_max_reject = true
+tls_advertise_hosts = *
+tls_certificate = MAIL_ROOT/localhost.crt
+tls_privatekey = MAIL_ROOT/localhost.key
+acl_smtp_mail = verification_sender
+acl_smtp_rcpt = verification_recipient
+acl_smtp_data = verification_data
+
+begin acl
+
+verification_sender:
+  deny  !encrypted = *
+        message = STARTTLS required
+  deny  !authenticated = *
+        message = SMTP authentication required
+  deny  condition = ${if !eqi{$sender_address}{MAIL_FROM}}
+        message = Sender address not allowed
+  accept
+
+verification_recipient:
+  accept verify = recipient
+  deny   message = No route for recipient
+
+verification_data:
+  deny  condition = ${if !eqi{${address:$h_from:}}{MAIL_FROM}}
+        message = From header must match the envelope sender
+  accept
+
+begin routers
+
+verification_bounces:
+  driver = redirect
+  domains = MAIL_DOMAIN
+  local_parts = verify
+  condition = ${if eq{$sender_address}{}}
+  data = :blackhole:
+
+external_dns:
+  driver = dnslookup
+  domains = !MAIL_DOMAIN
+  ignore_target_hosts = 0.0.0.0/8 : 10.0.0.0/8 : 100.64.0.0/10 : 127.0.0.0/8 : 169.254.0.0/16 : 172.16.0.0/12 : 192.168.0.0/16 : 198.18.0.0/15 : 224.0.0.0/3
+  self = fail
+  transport = signed_smtp
+  no_more
+
+begin transports
+
+signed_smtp:
+  driver = smtp
+  hosts_require_tls = *
+  dkim_domain = MAIL_DOMAIN
+  dkim_selector = currentmusic
+  dkim_private_key = MAIL_ROOT/dkim.key
+  dkim_strict = true
+
+begin retry
+
+* * F,4m,1m
+
+begin authenticators
+
+submission_plain:
+  driver = plaintext
+  public_name = PLAIN
+  server_advertise_condition = ${if def:tls_in_cipher}
+  server_condition = ${if crypteq{$auth3}{${lookup{$auth2}lsearch{MAIL_ROOT/passwd}{$value}{*}}}}
+  server_set_id = $auth2
+  server_prompts = :
