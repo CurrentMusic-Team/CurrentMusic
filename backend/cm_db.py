@@ -1,10 +1,13 @@
 """CurrentMusic 后端数据库层（sqlite3 标准库，WAL，按请求建连接）。"""
+import hashlib
+import hmac
 import json
 import logging
 import os
 import secrets
 import sqlite3
 import time
+import unicodedata
 
 import cm_levels
 
@@ -40,6 +43,13 @@ CREATE TABLE IF NOT EXISTS users (
   title TEXT DEFAULT '',             /* 站内头衔（管理员授予；''=无）。广场/主页/帖子/评论等各处展示 */
   avatar_decoration TEXT DEFAULT ''  /* 已选头像挂件 id（''=未设置）；需听歌时长达标才可设置 */
 );
+CREATE TABLE IF NOT EXISTS password_login_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_key TEXT NOT NULL,
+  attempted_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_password_login_account ON password_login_attempts(account_key, attempted_at);
+CREATE INDEX IF NOT EXISTS idx_password_login_expiry ON password_login_attempts(attempted_at);
 CREATE TABLE IF NOT EXISTS songs (
   ncm_id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
@@ -512,9 +522,24 @@ def admin_delete_donation(donation_id):
         conn.close()
 
 
+PUBLIC_NICKNAME = "public_nickname(u.id, u.nickname, u.username, u.phone, u.is_bot)"
+
+
+def public_nickname(uid, nickname, username, phone, is_bot=False):
+    if uid is None:
+        return None
+    name = str(nickname or "").strip()
+    normalized = unicodedata.normalize("NFKC", name).casefold()
+    login_name = unicodedata.normalize("NFKC", username or "").casefold()
+    if not name or (not is_bot and (normalized == login_name or normalized == phone)):
+        return f"用户#{uid}"
+    return name
+
+
 def connect():
     conn = sqlite3.connect(DB_PATH, timeout=8)
     conn.row_factory = sqlite3.Row
+    conn.create_function("public_nickname", 5, public_nickname, deterministic=True)
     # journal_mode 是持久化属性，只在 init() 设一次。以前每条连接都执行
     # PRAGMA journal_mode=WAL，高频缓存读会反复申请库锁，高峰期可能被拖住。
     conn.execute("PRAGMA busy_timeout=8000")
@@ -992,7 +1017,6 @@ def sms_quota_state(phone, ip=""):
 # ---------- 用户 ----------
 
 def hash_password(password, salt):
-    import hashlib
     return hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 120_000).hex()
 
 
@@ -1062,15 +1086,63 @@ def get_user_by_phone(phone):
         conn.close()
 
 
+_PASSWORD_LOGIN_LIMIT = 5
+_PASSWORD_LOGIN_WINDOW = 15 * 60
+
+
+class PasswordLoginLimited(Exception):
+    def __init__(self, retry_after):
+        super().__init__("密码尝试过多，请稍后再试，或使用其他登录方式")
+        self.retry_after = retry_after
+
+
+def reserve_password_attempt(account_key):
+    """把进行中的校验计入额度，避免并发请求同时通过限流检查。"""
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        now = int(time.time())
+        conn.execute("DELETE FROM password_login_attempts WHERE attempted_at<=?",
+                     (now - _PASSWORD_LOGIN_WINDOW,))
+        count, oldest = conn.execute(
+            "SELECT COUNT(*), MIN(attempted_at) FROM password_login_attempts WHERE account_key=?",
+            (account_key,),
+        ).fetchone()
+        if count >= _PASSWORD_LOGIN_LIMIT:
+            conn.commit()
+            raise PasswordLoginLimited(oldest + _PASSWORD_LOGIN_WINDOW - now)
+        cur = conn.execute("INSERT INTO password_login_attempts(account_key, attempted_at) VALUES(?,?)",
+                           (account_key, now))
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def finish_password_attempt(attempt_id):
+    conn = connect()
+    try:
+        conn.execute("DELETE FROM password_login_attempts WHERE id=?", (attempt_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def verify_login(username, password):
     """账号标识支持用户名或手机号（手机号注册的用户可直接用手机号登录）。"""
     u = get_user_by_name(username)
     if not u and username.isdigit():
         u = get_user_by_phone(username)
-    if not u:
+    if u:
+        key = f"user:{u['id']}"
+    else:
+        key = "unknown:" + hashlib.sha256(username.encode()).hexdigest()
+    attempt_id = reserve_password_attempt(key)
+    # 未匹配的账号同样计数并运行一次密码哈希，保持失败响应一致。
+    candidate = hash_password(password, u["salt"] if u else "0000000000000000")
+    if not hmac.compare_digest(candidate, u["pass_hash"] if u else "0" * 64) or not u:
         return None
-    if hash_password(password, u["salt"]) != u["pass_hash"]:
-        return None
+    finish_password_attempt(attempt_id)
     if u.get("is_bot"):
         raise PermissionError("系统机器人账号不可登录")
     if u.get("disabled"):
@@ -1750,15 +1822,11 @@ _SQUARE_SORTS = {
     "level": "u.level DESC",
     "reg": "u.created_at DESC",
     "reg_asc": "u.created_at ASC",
-    "name": "u.nickname COLLATE NOCASE ASC",
+    "name": "nickname COLLATE NOCASE ASC",
     "days": "days DESC",                   # 听歌天数
     "listen": "listenMs DESC",             # 听歌时长（实际收听毫秒累计，见 listen_ms）
     "likes": "likes DESC",                 # 点赞数
 }
-
-# 发现 → 用户页：站长 Rcst20 始终置顶（与当前排序、角色顺序无关）。
-# 只影响 ORDER BY，不绕过 WHERE：搜索/仅显示在听歌/关闭公开/禁用时仍按各过滤条件生效。
-SQUARE_PINNED_USERNAME = "Rcst20"
 
 # 「正在听歌」判定窗口（秒）：与广场头部统计、个人主页「当前在听」一致
 LISTENING_WINDOW = 300
@@ -1826,7 +1894,8 @@ def posts_list(viewer_id, offset=0, limit=20, author_id=None, *, post_id=None):
     try:
         rows = c.execute(
             "SELECT p.id, p.user_id, p.title, p.content, p.attachments, p.created_at, "
-            "u.nickname, u.avatar, u.avatar_decoration, u.is_admin, u.is_super, u.is_owner, u.title AS author_title "
+            f"{PUBLIC_NICKNAME} AS nickname, u.avatar, u.avatar_decoration, "
+            "u.is_admin, u.is_super, u.is_owner, u.title AS author_title "
             "FROM posts p JOIN users u ON u.id = p.user_id" + where +
             " ORDER BY p.id DESC LIMIT ? OFFSET ?", args + [lim, off]).fetchall()
         ids = [r["id"] for r in rows]
@@ -1954,8 +2023,9 @@ def post_comments_list(post_id, limit=100, *, after=0):
     try:
         rows = c.execute(
             "SELECT pc.id, pc.post_id, pc.user_id, pc.content, pc.reply_to, pc.created_at, "
-            "u.nickname, u.avatar, u.avatar_decoration, u.is_admin, u.is_super, u.is_owner, u.title, "
-            "r.id AS _rid, r.user_id AS _ruid, ru.nickname AS _rnick "
+            f"{PUBLIC_NICKNAME} AS nickname, u.avatar, u.avatar_decoration, "
+            "u.is_admin, u.is_super, u.is_owner, u.title, r.id AS _rid, r.user_id AS _ruid, "
+            "public_nickname(ru.id, ru.nickname, ru.username, ru.phone, ru.is_bot) AS _rnick "
             "FROM post_comments pc JOIN users u ON u.id = pc.user_id "
             "LEFT JOIN post_comments r ON r.id = pc.reply_to "
             "LEFT JOIN users ru ON ru.id = r.user_id "
@@ -2040,7 +2110,7 @@ def square_users(query="", sort="composite", limit=30, offset=0, listening_only=
     where = "WHERE u.disabled=0 AND u.username != '__internal__' AND u.public_square=1"
     args = []
     if query:
-        where += " AND (u.nickname LIKE ? OR u.bio LIKE ?)"
+        where += f" AND ({PUBLIC_NICKNAME} LIKE ? OR u.bio LIKE ?)"
         args = [f"%{query}%"] * 2
     if listening_only:
         # 与 square_stats 同一口径：近 5 分钟内有播放记录即视为「正在听歌」
@@ -2050,7 +2120,8 @@ def square_users(query="", sort="composite", limit=30, offset=0, listening_only=
     conn = connect()
     try:
         rows = conn.execute(
-            f"""SELECT u.id, u.nickname, u.avatar, u.bio, u.created_at, u.is_admin, u.is_super, u.is_owner,
+            f"""SELECT u.id, {PUBLIC_NICKNAME} AS nickname, u.avatar, u.bio, u.created_at,
+                   u.is_admin, u.is_super, u.is_owner,
                    u.avatar_decoration, u.title, u.ip_region, u.is_bot, u.level,
                    (SELECT COUNT(*) FROM likes l WHERE l.user_id=u.id) AS likes,
                    (SELECT COUNT(*) FROM playlists p WHERE p.user_id=u.id) AS playlists,
@@ -2058,10 +2129,10 @@ def square_users(query="", sort="composite", limit=30, offset=0, listening_only=
                    (SELECT COALESCE(SUM(pl.ms),0) FROM plays pl
                      WHERE pl.user_id=u.id) AS listenMs
             FROM users u {where}
-            ORDER BY (u.username = ?) DESC, u.is_owner DESC, u.is_super DESC, u.is_admin DESC,
+            ORDER BY (u.id = ?) DESC, u.is_owner DESC, u.is_super DESC, u.is_admin DESC,
                      {order}, u.id DESC
-            LIMIT ? OFFSET ?""",   # Rcst20 恒置顶；其余按角色，再按用户选择的排序
-            args + [SQUARE_PINNED_USERNAME, limit, offset],
+            LIMIT ? OFFSET ?""",
+            args + [os.environ.get("CM_SQUARE_PINNED_USER_ID", ""), limit, offset],
         ).fetchall()
         total = conn.execute(f"SELECT COUNT(*) FROM users u {where}", args).fetchone()[0]
         users = []
@@ -2137,7 +2208,8 @@ def public_profile(uid):
         m = song_rows_to_meta(songs_by_ids([cur["ncm_id"]]))
         current = (m or [None])[0]
     return {
-        "user": {"id": u["id"], "nickname": u["nickname"], "avatar": u["avatar"], "bio": u["bio"],
+        "user": {"id": u["id"], "nickname": public_nickname(uid, u["nickname"], u["username"], u["phone"], u["is_bot"]),
+                 "avatar": u["avatar"], "bio": u["bio"],
                  "created_at": u["created_at"], "isAdmin": bool(u.get("is_admin")),
                  "isSuper": bool(u.get("is_super")),
                  "isOwner": bool(u.get("is_owner")),
@@ -2226,6 +2298,7 @@ def set_password(uid, new_pw):
             (hash_password(new_pw, salt), salt, uid),
         )
         conn.execute('DELETE FROM login_2fa WHERE uid=?', (uid,))
+        conn.execute('DELETE FROM password_login_attempts WHERE account_key=?', (f"user:{uid}",))
         conn.execute("UPDATE account_2fa SET pending='',pending_sid='',pending_until=0 WHERE uid=?", (uid,))
         conn.commit()
     finally:
@@ -3216,7 +3289,8 @@ def ann_list(include_removed=False, author_uid=None, limit=50):
         if author_uid is not None:
             where.append("a.user_id=?")
             vals.append(author_uid)
-        sql = ("SELECT a.*, u.username AS author_username, u.nickname AS author_nickname"
+        author = "u.username AS author_username, u.nickname" if include_removed else PUBLIC_NICKNAME
+        sql = (f"SELECT a.*, {author} AS author_nickname"
                " FROM announcements a LEFT JOIN users u ON u.id=a.user_id")
         if where:
             sql += " WHERE " + " AND ".join(where)

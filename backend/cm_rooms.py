@@ -5,7 +5,7 @@ import re
 import secrets
 import time
 
-from cm_db import connect, hash_password
+from cm_db import PUBLIC_NICKNAME, connect, hash_password, public_nickname
 
 ONLINE_SECONDS = 60
 IDLE_SECONDS = 30 * 60
@@ -195,7 +195,9 @@ def room_by_ident(conn, ident, *, by_code=False):
 
 
 def get_member(conn, room_id, user_id):
-    row = conn.execute("SELECT * FROM room_members WHERE room_id=? AND user_id=?",
+    row = conn.execute(f"""SELECT {PUBLIC_NICKNAME} AS nickname, rm.*
+                       FROM room_members rm LEFT JOIN users u ON u.id=rm.user_id
+                       WHERE rm.room_id=? AND rm.user_id=?""",
                        (room_id, user_id)).fetchone()
     return dict(row) if row else None
 
@@ -253,7 +255,7 @@ def list_rooms(conn, user_id, scope, query, limit, offset):
                    CASE WHEN r.closed_at=0 THEN
                        (SELECT COUNT(*) FROM room_members m WHERE m.room_id=r.id AND m.last_seen >= ?)
                        ELSE 0 END AS online,
-                   u.nickname AS owner_name
+                   {PUBLIC_NICKNAME} AS owner_name
             FROM rooms r LEFT JOIN users u ON u.id=r.owner_id
             WHERE {where} ORDER BY (r.closed_at!=0), online DESC, r.updated_at DESC, r.id DESC
             LIMIT ? OFFSET ?""",
@@ -339,7 +341,9 @@ def join_room(conn, room, user, *, password_checked=False):
     conn.execute("""INSERT INTO room_members(room_id,user_id,role,nickname,avatar,joined_at,last_seen)
         VALUES(?,?,?,?,?,?,?) ON CONFLICT(room_id,user_id) DO UPDATE SET
         role=excluded.role,nickname=excluded.nickname,avatar=excluded.avatar,last_seen=excluded.last_seen""",
-                 (room_id, uid, role, user["nickname"], user.get("avatar") or "", now, now))
+                 (room_id, uid, role, public_nickname(uid, user["nickname"], user.get("username"),
+                                                     user.get("phone"), user.get("is_bot")),
+                  user.get("avatar") or "", now, now))
     if not member or member["last_seen"] < now - ONLINE_SECONDS:
         emit_event(conn, room_id, "join", {"userId": uid})
     return role
@@ -364,8 +368,8 @@ def leave_room(conn, room, uid):
 
 
 def list_members(conn, room_id):
-    return [dict(row) for row in conn.execute("""
-        SELECT rm.*, u.title, u.is_admin, u.is_super, u.is_owner
+    return [dict(row) for row in conn.execute(f"""
+        SELECT {PUBLIC_NICKNAME} AS nickname, rm.*, u.title, u.is_admin, u.is_super, u.is_owner
         FROM room_members rm LEFT JOIN users u ON u.id=rm.user_id
         WHERE rm.room_id=? AND rm.last_seen>=?
         ORDER BY CASE rm.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, rm.joined_at, rm.user_id
@@ -402,14 +406,14 @@ def manage_member(conn, room, actor, target_id, action, *, on=True, ban=False, r
 
 
 def list_bans(conn, room_id):
-    return [dict(row) for row in conn.execute("""SELECT b.user_id AS userId, b.reason, u.nickname,
+    return [dict(row) for row in conn.execute(f"""SELECT b.user_id AS userId, b.reason, {PUBLIC_NICKNAME} AS nickname,
         b.created_at AS createdAt FROM room_bans b LEFT JOIN users u ON u.id=b.user_id
         WHERE room_id=? ORDER BY b.created_at DESC""", (room_id,))]
 
 
 def queue_list(conn, room_id, uid, role):
-    return [dict(row) for row in conn.execute("""
-        SELECT q.*, u.nickname AS requester FROM room_queue q LEFT JOIN users u ON u.id=q.requested_by
+    return [dict(row) for row in conn.execute(f"""
+        SELECT q.*, {PUBLIC_NICKNAME} AS requester FROM room_queue q LEFT JOIN users u ON u.id=q.requested_by
         WHERE q.room_id=? AND (q.status IN ('queued','playing','played')
             OR (q.status='pending' AND (? OR q.requested_by=?)))
         ORDER BY CASE q.status WHEN 'playing' THEN 0 WHEN 'queued' THEN 1 WHEN 'pending' THEN 2 ELSE 3 END,

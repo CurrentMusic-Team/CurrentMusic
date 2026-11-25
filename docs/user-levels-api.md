@@ -42,6 +42,8 @@
 
 `GET /cm/users/square` 继续支持 `query`、`listening`、`limit` 与 `offset`。新增的 `sort` 值如下。
 
+`query` 匹配公开昵称或个签。与登录名或绑定手机号相同的昵称会在公开资料中显示为 `用户#<id>`。
+
 | 值 | 排序方式 |
 | --- | --- |
 | `composite` | 默认。依次按等级、累计积分、最近活跃降序 |
