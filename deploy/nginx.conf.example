@@ -38,6 +38,17 @@ server {
         proxy_read_timeout 90s;
     }
 
+    # The status mail link contains a per-address unsubscribe token.
+    location ^~ /cm/status/email/unsubscribe {
+        access_log off;
+        error_log /dev/null crit;
+        proxy_cache off;
+        proxy_pass http://127.0.0.1:3010/status/email/unsubscribe;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
     location ^~ /cm/feedback {
         client_max_body_size 2112k;
         client_body_timeout 10s;

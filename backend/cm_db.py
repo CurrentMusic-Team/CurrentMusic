@@ -142,6 +142,11 @@ CREATE TABLE IF NOT EXISTS email_codes (
   sent_at INTEGER NOT NULL,
   tries INTEGER DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS status_mail_preferences (
+  email TEXT PRIMARY KEY,
+  token TEXT NOT NULL UNIQUE,
+  unsubscribed_at INTEGER
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS phone_codes (
   phone TEXT PRIMARY KEY,
   code TEXT DEFAULT '',        -- 自建网关模式存码；网易云通道由上游生成，此处留空

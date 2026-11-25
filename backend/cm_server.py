@@ -35,6 +35,7 @@ import cm_lx
 import cm_lddc
 import cm_levels
 import cm_mail
+import cm_status_mail
 import cm_music_service
 import cm_kugou
 import cm_kugou_catalog
@@ -1321,12 +1322,12 @@ def jresp(handler, code, obj, cache_control=None, extra_headers=None):
     handler.wfile.write(body)
 
 
-def hresp(handler, code, html):
+def hresp(handler, code, html, cache_control="no-cache"):
     """HTML 响应（通行证文档页等；不缓存，避免发版后仍看到旧文档）。"""
     body = html.encode("utf-8")
     handler.send_response(code)
     handler.send_header("Content-Type", "text/html; charset=utf-8")
-    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("Cache-Control", cache_control)
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
@@ -2371,13 +2372,15 @@ def route(handler, method):
     path = parsed.path.rstrip("/") or "/"
     q = {k: v[0] for k, v in parse_qs(parsed.query, keep_blank_values=True).items()}
     feedback_post = path == "/feedback" and method == "POST"
+    unsubscribe_post = path == "/status/email/unsubscribe" and method == "POST"
     feedback_media = re.fullmatch(r"/feedback/([0-9a-f]{32})/media/(screenshot-[123]|video-1)", path)
     audio_report = path == "/usage/audio" and method == "POST"
     if audio_report:
         size = handler.headers.get("Content-Length") or "0"
         if not size.isdecimal() or len(size) > 3 or int(size) > 256:
             raise ApiError(400, "请求体过大")
-    body = read_json(handler) if method in ("POST", "PUT", "DELETE") and not (feedback_post or feedback_media) else None
+    body = read_json(handler) if method in ("POST", "PUT", "DELETE") and not (
+        feedback_post or feedback_media or unsubscribe_post) else None
     # 限速按**真实客户端**分桶。此前用 handler.client_address（= nginx 的 127.0.0.1），
     # 全站共用一个 300/min 的桶：几个用户同时切歌就会把播放地址解析打成 429。
     ip = cm_ncm_gateway.rate_key(handler)
@@ -2401,6 +2404,15 @@ def route(handler, method):
         return docs_redirect(handler, "guide-network-lines-api")
     if path == "/health" and method == "GET":
         return jresp(handler, 200, {"ok": True, "now": int(time.time())})
+
+    if path == "/status/email/unsubscribe" and method in ("GET", "POST"):
+        token = q.get("token") if method == "GET" else cm_status_mail.form_token(handler)
+        try:
+            status, page = cm_status_mail.confirmation(method, token)
+        except sqlite3.Error:
+            log.exception("服务状态邮件退订暂不可用")
+            return hresp(handler, 503, "暂时无法处理退订，请稍后再试。", cache_control="no-store")
+        return hresp(handler, status, page, cache_control="no-store")
 
     if path == "/usage" and method == "GET":
         return jresp(handler, 200, cm_usage.snapshot(), cache_control="public, max-age=15")
@@ -3219,6 +3231,8 @@ def route(handler, method):
             ("GET", "/audio-sources", "Bearer", "自研音源 v1 导入目录，返回音源名称和适用平台。详见 /api-docs/reference/guide-audio-sources-api/"),
             ("GET", "/audio-sources/currentmusic-engine/resolve", "Bearer", "已导入的流声引擎音源取链，接受 id、level、refresh、supportsDolby；网易云曲库。详见 /api-docs/reference/guide-audio-sources-api/"),
             ("GET", "/badges/powered-by.svg", "公开", "流声引擎署名徽章，返回 SVG；lang 可选 zh-CN（默认）或 en。嵌入示例 /api-docs/reference/guide-engine-badge-api/"),
+            ("GET", "/status/email/unsubscribe", "邮件链接", "打开服务状态邮件退订确认页，需退订链接中的 token"),
+            ("POST", "/status/email/unsubscribe", "邮件链接", "确认退订服务状态邮件，表单字段 token，可重复提交"),
             ("GET", "/lx/source.js", "token 查询参数", "落雪音乐（LX Music）自定义音源脚本。token 为落雪音源专用令牌（clx_ 前缀）或 CurrentMusic 登录会话令牌。wy 源支持 musicUrl，兼容宿主可调用公开的 search 和 lyric 扩展。脚本含令牌，no-store 不缓存。缺少令牌返回 401，失效令牌返回提示脚本。详见 /api-docs/reference/guide-lx-music-source/"),
             ("GET", "/lx/token", "Bearer", "查看本人落雪音源专用令牌状态 `{enabled, createdAt, lastSeen}`（不返回明文；明文只在生成/轮换时返回一次）"),
             ("POST", "/lx/token", "Bearer", "生成本人专用令牌，一次性返回 `{token, sourceUrl}` 直链；已有令牌时幂等返回现状（`created:false`），找回直链须轮换"),
