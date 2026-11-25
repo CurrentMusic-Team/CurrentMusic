@@ -88,7 +88,12 @@ python3 backend/cm_server.py
 | `CM_FEEDBACK_DIAGNOSTICS_DIR` | 空 | 私有诊断对象目录，绝对路径且权限为 `0700`，位于静态目录与常规备份目录之外 |
 | `CM_FEEDBACK_DIAGNOSTICS_ORIGIN` | 空 | 诊断入口的固定 HTTPS origin，提供 `/app/` 和管理员下载 API |
 | `CM_FEEDBACK_MEDIA_HOSTS` | 空 | 开启反馈媒体的代理 Host 列表，逗号分隔。需 Pillow、FFmpeg、ffprobe 和私有的 `media` 子目录 |
-| `CM_SMTP_HOST/PORT/USER/PASS/FROM` | 空 | 邮箱验证码 |
+| `CM_SMTP_USER/PASS` | 空 | 邮箱验证码发信账号与 SMTP 密码 |
+| `CM_SMTP_HOST` | `smtp.qq.com` | SMTP 服务地址 |
+| `CM_SMTP_SECURITY` | `ssl` | 使用隐式 TLS，或设为 `starttls` 以先升级连接再登录 |
+| `CM_SMTP_PORT` | `ssl` 为 `465`，`starttls` 为 `587` | SMTP 端口，可按邮件服务商要求覆盖 |
+| `CM_SMTP_CA_FILE` | 系统 CA | 使用私有证书时可指定受信任的 PEM 文件，仍校验 SMTP 主机名 |
+| `CM_SMTP_FROM` | `CM_SMTP_USER` | SMTP 服务商已验证的发件地址。登录名与发件地址不同时必填 |
 | `CM_SMS_WEBHOOK/TOKEN/SIGN` | 空 | 短信验证码 |
 | `CM_CAST_CACHE` | `<CM_DATA_DIR>/cast` | 投屏音频缓存 |
 | `CM_SHARE_DIR` | `<CM_DATA_DIR>/share` | 分享图缓存 |
@@ -100,6 +105,8 @@ python3 backend/cm_server.py
 NCM、AI、SMTP、SMS、LDDC 都是可选的；未配置时对应功能返回明确错误或降级，不影响账号/浏览/歌单。
 `CM_INTERNAL_PASS` 只用于内部服务登录，自托管通常不需要。
 LDDC 的安装/升级见 `deploy/README.md`；它使用独立 venv，后端认证依赖与 LDDC 的独立环境分开安装。
+验证码发信账号应独立于批量通知账号，避免通知流量占满验证码通道的配额。通过受保护的 systemd `EnvironmentFile` 配置 SMTP 凭据。
+本机部署可参照 [Exim 发信服务](../deploy/mail/README.md)。
 
 ## API
 
