@@ -1,5 +1,6 @@
 // 公开用户主页：资料 + 统计（点赞/歌单/听歌天数/累计时长）+ 当前在听 + 最近听过 + TA 的歌单
-import { api } from '../api.js';
+import { api, auth } from '../api.js';
+import { mountProfileSocial } from './social.js';
 import { esc, avatarHTML, fmtListen, userTags, skelProfile } from '../ui.js';
 import { player } from '../player.js';
 import { mountPosts } from '../posts.js';
@@ -37,6 +38,7 @@ export async function render(el, params) {
           <h2>${esc(u.nickname)}${userTags(u)}</h2>
           ${u.bio ? `<div class="cm-up-bio">${esc(u.bio)}</div>` : ''}
           <div class="cm-up-sub">注册于 ${fmtTime(u.created_at)}${u.ipRegion ? ` · <span class="cm-uregion" title="IP 属地"><span class="material-icons-outlined">location_on</span>IP 属地 ${esc(u.ipRegion)}</span>` : ''}</div>
+          <div class="cm-social-actions" data-profile-social></div>
         </div>
       </div>
     </div>
@@ -85,6 +87,9 @@ export async function render(el, params) {
     </div>` : ''}`}
   `;
 
+  if (auth.token && Number(uid) !== Number(auth.user?.id)) {
+    mountProfileSocial(el.querySelector('[data-profile-social]'), Number(uid));
+  }
   if (showPosts) {
     mountPosts(el.querySelector('.cm-profile-posts'), { author: uid });
     return;

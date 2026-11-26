@@ -106,9 +106,9 @@ def parse_mentions(raw):
     for v in raw[: MAX_MENTIONS * 2]:
         try:
             i = int(v)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
-        if i > 0 and i not in out:
+        if 0 < i <= 2**63 - 1 and i not in out:
             out.append(i)
         if len(out) >= MAX_MENTIONS:
             break
@@ -269,11 +269,14 @@ def _with_users(rows):
         conn.close()
 
 
-def send(user, content, image, mentions, atts=None, quote=0, mention_all=False, streaming=False):
+def send(user, content, image, mentions, atts=None, quote=0, mention_all=False, streaming=False, *, guard=None):
     """落库一条消息并广播。调用方负责鉴权、频控与文本清洗
     （quote 须先经 quote_exists 校验，mention_all 须先校验管理员权限）。"""
     conn = cm_db.connect()
     try:
+        if guard:
+            conn.execute("BEGIN IMMEDIATE")
+            guard(conn)
         cur = conn.execute(
             "INSERT INTO chat_messages(user_id, content, image, mentions, atts, quote, mention_all, created_at) "
             "VALUES(?,?,?,?,?,?,?,?)",
@@ -295,32 +298,33 @@ def send(user, content, image, mentions, atts=None, quote=0, mention_all=False, 
         mops = [dict(m) for m in mrows]     # Row 绑定连接，必须在 close 前转 dict
         qout = quotes_out(conn, [quote]) if quote else {}
         sender = conn.execute(f"SELECT {_USER_FIELDS} FROM users u WHERE u.id=?", (user["id"],)).fetchone()
+        out = _row_out({"id": mid, "user_id": user["id"], "content": content,
+                        "image": image or "", "atts": json.dumps(atts or [], ensure_ascii=False),
+                        "quote": int(quote or 0), "mention_all": 1 if mention_all else 0,
+                        "created_at": int(time.time())},
+                       sender, mops, streaming, quote=qout.get(int(quote or 0)))
+        emit("message", out, conn=conn)
         conn.commit()
+        return out
     finally:
         conn.close()
-    out = _row_out({"id": mid, "user_id": user["id"], "content": content,
-                    "image": image or "", "atts": json.dumps(atts or [], ensure_ascii=False),
-                    "quote": int(quote or 0), "mention_all": 1 if mention_all else 0,
-                    "created_at": int(time.time())},
-                   sender, mops, streaming, quote=qout.get(int(quote or 0)))
-    emit("message", out)
-    return out
 
 
 def edit(mid, content, atts=None, streaming=False):
-    """更新一条已存在的消息（AI 流式输出用）：落库并广播 edit 事件。"""
+    """更新 AI 消息并在同一事务内写入实时事件。"""
     atts = atts or []
+    payload = {"id": int(mid), "content": content or "", "atts": atts,
+               "streaming": bool(streaming), "updatedAt": int(time.time())}
     conn = cm_db.connect()
     try:
-        conn.execute(
+        result = conn.execute(
             "UPDATE chat_messages SET content=?, atts=? WHERE id=? AND deleted=0",
             (content or "", json.dumps(atts, ensure_ascii=False), int(mid)))
+        if result.rowcount:
+            emit("edit", payload, conn=conn)
         conn.commit()
     finally:
         conn.close()
-    payload = {"id": int(mid), "content": content or "", "atts": atts,
-               "streaming": bool(streaming), "updatedAt": int(time.time())}
-    emit("edit", payload)
     return payload
 
 
@@ -342,21 +346,20 @@ def list_messages(before=0, limit=30):
         conn.close()
 
 
-def delete_message(mid, user):
+def delete_message(mid, user, *, guard=None):
     """软删：本人或管理员（is_admin/is_super/is_owner）。返回是否删除。"""
     conn = cm_db.connect()
     try:
+        conn.execute("BEGIN IMMEDIATE")
+        moderator = guard(conn) if guard else (user.get("is_admin") or user.get("is_super") or user.get("is_owner"))
         r = conn.execute("SELECT * FROM chat_messages WHERE id=? AND deleted=0", (int(mid),)).fetchone()
-        if not r:
-            return False
-        if r["user_id"] != user["id"] and not (user.get("is_admin") or user.get("is_super")
-                                               or user.get("is_owner")):
+        if not r or (r["user_id"] != user["id"] and not moderator):
             return False
         conn.execute("UPDATE chat_messages SET deleted=1 WHERE id=?", (int(mid),))
+        emit("delete", {"id": int(mid)}, conn=conn)
         conn.commit()
     finally:
         conn.close()
-    emit("delete", {"id": int(mid)})
     return True
 
 
@@ -423,19 +426,22 @@ def recent_members(limit=20):
 MAX_EVENTS = 200
 
 
-def emit(etype, payload):
-    conn = cm_db.connect()
-    try:
-        conn.execute("INSERT INTO chat_events(type, payload, created_at) VALUES(?,?,?)",
-                     (etype, json.dumps(payload, ensure_ascii=False), int(time.time())))
-        old = conn.execute(
-            "SELECT seq FROM chat_events ORDER BY seq DESC LIMIT 1 OFFSET ?", (MAX_EVENTS,)
-        ).fetchone()
-        if old:
-            conn.execute("DELETE FROM chat_events WHERE seq<=?", (old["seq"],))
-        conn.commit()
-    finally:
-        conn.close()
+def emit(etype, payload, *, conn=None):
+    if conn is None:
+        conn = cm_db.connect()
+        try:
+            emit(etype, payload, conn=conn)
+            conn.commit()
+        finally:
+            conn.close()
+        return
+    conn.execute("INSERT INTO chat_events(type, payload, created_at) VALUES(?,?,?)",
+                 (etype, json.dumps(payload, ensure_ascii=False), int(time.time())))
+    old = conn.execute(
+        "SELECT seq FROM chat_events ORDER BY seq DESC LIMIT 1 OFFSET ?", (MAX_EVENTS,)
+    ).fetchone()
+    if old:
+        conn.execute("DELETE FROM chat_events WHERE seq<=?", (old["seq"],))
 
 
 def latest_seq():

@@ -56,6 +56,7 @@ import cm_stream
 import cm_share
 import cm_ai
 import cm_chat
+import cm_social
 import cm_region
 import cm_lines
 import cm_usage
@@ -1308,6 +1309,8 @@ def jresp(handler, code, obj, cache_control=None, extra_headers=None):
         cache_control = "no-store"
     if path.rstrip("/") == "/feedback" or path.startswith(("/feedback/", "/admin/feedback/")):
         cache_control = "no-store"
+    if path.startswith(("/social/", "/admin/social/")):
+        cache_control = "private, no-store"
     body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
     handler.send_response(code)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
@@ -3405,9 +3408,32 @@ def route(handler, method):
             ("GET", "/ncm/comments/replies", "公开 / 可选 Bearer", "按 commentId 懒加载回复，nextCursor 向后翻页；不重复返回父评论"),
             ("POST", "/ncm/comment", "Bearer + 网易云绑定", "JSON {id,type,t,commentId?,content?,threadId?,confirm:1}；t=1 发评、2 回复、0 删除"),
             ("POST", "/ncm/comment/like", "Bearer + 网易云绑定", "JSON {id,type,cid,t,threadId?,confirm:1}；t=1 点赞、0 取消"),
+            ("GET", "/social/conversations", "公开 / Bearer", "社交对话列表，访客只见世界聊天。"),
+            ("POST", "/social/conversations", "Bearer", "创建私有群或打开好友私聊。"),
+            ("GET", "/social/conversations/{id}", "公开 / Bearer", "公开群资料或自己的私有对话资料。"),
+            ("PUT", "/social/conversations/{id}", "群管理者 Bearer", "更新群简介及公告。"),
+            ("DELETE", "/social/conversations/{id}", "Bearer", "退出自建群。"),
+            ("GET", "/social/conversations/{id}/messages", "Bearer", "私有对话分页消息及事件游标。"),
+            ("POST", "/social/conversations/{id}/messages", "Bearer", "发送私有消息，支持图片、引用和音乐卡片。"),
+            ("DELETE", "/social/conversations/{id}/messages/{messageId}", "Bearer", "删除自己的消息或群管理者删除群消息。"),
+            ("GET", "/social/conversations/{id}/events", "Bearer", "私有对话增量事件。"),
+            ("POST", "/social/conversations/{id}/images", "Bearer", "上传私有对话图片。"),
+            ("GET", "/social/conversations/{id}/images/{filename}", "Bearer", "读取私有对话图片。"),
+            ("PUT", "/social/conversations/{id}/read", "Bearer", "更新对话已读位置。"),
+            ("GET", "/social/conversations/{id}/members", "Bearer", "查看和搜索群成员。"),
+            ("PUT", "/social/conversations/{id}/members/{userId}", "群管理者 Bearer", "禁言、解禁、移出和设置群管理员。"),
+            ("POST", "/social/conversations/{id}/invites", "群管理者 Bearer", "邀请好友或恢复世界聊天成员。"),
+            ("PUT", "/social/conversations/{id}/invites", "Bearer", "接受或拒绝自己的群邀请。"),
+            ("GET", "/social/users", "Bearer", "按公开昵称找人。"),
+            ("GET", "/social/contacts", "Bearer", "好友、好友申请和群邀请。"),
+            ("GET", "/social/contacts/{id}", "Bearer", "本人和对方的好友状态。"),
+            ("PUT", "/social/contacts/{id}", "Bearer", "申请、接受、拒绝、撤回或删除好友。"),
+            ("POST", "/social/contacts/{id}/report", "Bearer", "举报现任或曾经的好友。"),
+            ("GET", "/admin/social/reports", "管理员 Bearer", "按状态分页查看好友举报。"),
+            ("PUT", "/admin/social/reports/{id}", "管理员 Bearer", "处理好友举报。"),
             ("GET", "/chat/messages", "公开", "公共聊天室：最近消息，发送者与被提及者使用公开昵称和用户 ID（?before=<id> 向更早翻页，?limit=1~50）"),
-            ("POST", "/chat/messages", "Bearer", "发送消息 {content≤500字, image?: 图片文件名, mentions?: [@用户id], atts?: [{type: song|album|artist|playlist, id, name, sub?, pic?}]≤5, quoteId?: 引用消息id（须存在且未删，摘要读取时实时生成）, mentionAll?: @全体成员（仅管理员，且 content 须含 @全体成员）}（1.5s 频控）。**@CurrentMusicAI 可提问（卡片可选）；按用户保存近 6 轮上下文，服务端异步联网检索后以 AI 账号回复：先发空消息占位，再经 /chat/live 的 edit 事件流式更新（streaming=true），最终内容为 Markdown，可带 ≤3 张 atts 卡片；消息带 image 时图片会作为视觉输入发送给 AI**"),
-            ("DELETE", "/chat/messages/{id}", "Bearer", "删除消息（本人或管理员/超管/站长，软删）"),
+            ("POST", "/chat/messages", "Bearer", "发送消息 {content≤500字, image?: 图片文件名, mentions?: [@用户id], atts?: [{type: song|album|artist|playlist, id, name, sub?, pic?}]≤5, quoteId?: 引用消息id（须存在且未删，摘要读取时实时生成）, mentionAll?: @全体成员（群管理者或有审核权限的站点管理员，且 content 须含 @全体成员）}（1.5s 频控）。**@CurrentMusicAI 可提问（卡片可选）；按用户保存近 6 轮上下文，服务端异步联网检索后以 AI 账号回复：先发空消息占位，再经 /chat/live 的 edit 事件流式更新（streaming=true），最终内容为 Markdown，可带 ≤3 张 atts 卡片；消息带 image 时图片会作为视觉输入发送给 AI**"),
+            ("DELETE", "/chat/messages/{id}", "Bearer", "删除世界聊天消息（本人、群或站点管理员，软删）"),
             ("POST", "/chat/image", "Bearer", "上传聊天图片 {file: base64, filename, contentType}（魔法字节校验，≤1.5MB，5s 频控）"),
             ("GET", "/chat/image/{file}", "公开", "聊天图片直链"),
             ("GET", "/chat/members", "公开", "聊天成员：?q= 实时搜索公开昵称（@ 提及使用用户 ID；无 q 返回近期活跃；尊重广场公开开关，AI 账号始终可搜到）"),
@@ -5679,44 +5705,72 @@ def route(handler, method):
             log.warning("AI 播放页异常 uid=%s: %s", u["id"], e)
         return None
 
-    # ---- 公共聊天室（发现页 Chat tab，v1.28.30） ----
+    # ---- 社交 ----
+    if path.startswith("/admin/social/"):
+        u = require_user(handler, allow_query=False)
+        if not (u.get("is_admin") or u.get("is_super") or u.get("is_owner")):
+            raise ApiError(403, "需要站点聊天审核权限")
+        return jresp(handler, 200, cm_social.review_reports(method, path, q, body, u["id"]))
+
+    if path.startswith("/social/"):
+        if method == "GET" and path in ("/social/conversations", "/social/conversations/1") and not handler.headers.get("Authorization"):
+            u = None
+        else:
+            u = require_user(handler, allow_query=False)
+        staff = bool(u and (u.get("is_admin") or u.get("is_super") or u.get("is_owner")))
+        result = cm_social.dispatch(method, path, q, body, u, staff)
+        if isinstance(result, tuple):
+            content_type, data = result
+            handler.send_response(200)
+            handler.send_header("Content-Type", content_type)
+            handler.send_header("Content-Length", str(len(data)))
+            handler.send_header("Cache-Control", "private, no-store")
+            handler.send_header("Access-Control-Allow-Origin", "*")
+            handler.end_headers()
+            handler.wfile.write(data)
+            return None
+        return jresp(handler, 200, result)
+
+    # ---- 世界聊天（保留公共聊天室接口） ----
     if path == "/chat/messages" and method == "GET":
         return jresp(handler, 200, {"messages": cm_chat.list_messages(
             before=int(q.get("before") or 0), limit=int(q.get("limit") or 30))})
 
     if path == "/chat/messages" and method == "POST":
         u = require_user(handler)
-        if cm_chat.throttled_send(u["id"]):
-            raise ApiError(429, "发言太快啦，歇一下")
         b = body or {}
+        if not isinstance(b, dict):
+            raise ApiError(400, "请求体必须是 JSON 对象")
         ok, content = cm_chat.validate_content(b.get("content"))
         image = str(b.get("image") or "")
         if image and not cm_chat.image_path(image):
             raise ApiError(400, "图片引用非法")
         atts = cm_chat.parse_atts((body or {}).get("atts"))
-        if not content and not image and not atts:
+        if not ok or not (content or image or atts):
             raise ApiError(400, "说点什么、带张图，或引用一首歌吧")
         mentions = cm_chat.parse_mentions(b.get("mentions"))
         # 手打 @CurrentMusicAI（没从选择器点选）也识别为提及
         bot = cm_ai.bot_uid()
         if bot and bot not in mentions and f"@{cm_ai.BOT_NICKNAME}" in (content or ""):
             mentions.append(bot)
-        # 引用：只收消息 id，目标必须存在且未删除；摘要读取时从原消息实时生成
-        try:
-            quote_id = int(b.get("quoteId") or 0)
-        except (TypeError, ValueError):
-            quote_id = 0
-        if quote_id and not cm_chat.quote_exists(quote_id):
-            raise ApiError(400, "引用的消息不存在或已删除")
-        # @全体成员：管理员专属（防普通用户刷屏骚扰全站），且文本里必须真的带标记
+        quote_id = cm_social.integer(b.get("quoteId"))
         mention_all = bool(b.get("mentionAll"))
-        if mention_all:
-            if not (u.get("is_admin") or u.get("is_super") or u.get("is_owner")):
-                raise ApiError(403, "只有管理员可以 @全体成员")
-            if cm_chat.QUOTE_SNIPPET not in (content or ""):
+        staff = bool(u.get("is_admin") or u.get("is_super") or u.get("is_owner"))
+
+        def guard(db):
+            moderator = cm_social.world_permissions(db, u, sending=True, staff=staff)
+            if mention_all and not moderator:
+                raise ApiError(403, "当前账号没有 @全体成员权限")
+            if mention_all and cm_chat.QUOTE_SNIPPET not in content:
                 raise ApiError(400, "内容中需要包含 @全体成员")
-        sent = cm_chat.send(u, content, image, mentions, atts,
-                            quote=quote_id, mention_all=mention_all)
+            if quote_id and not db.execute("SELECT 1 FROM chat_messages WHERE id=? AND deleted=0", (quote_id,)).fetchone():
+                raise ApiError(400, "引用的消息不存在或已删除")
+            mentions[:] = cm_social.world_mentions(db, mentions)
+            if cm_chat.throttled_send(u["id"]):
+                raise ApiError(429, "发言太快啦，歇一下")
+
+        sent = cm_chat.send(u, content, image, mentions, atts, quote=quote_id,
+                            mention_all=mention_all, guard=guard)
         if cm_ai.should_reply(u, mentions):
             cm_ai.spawn_reply(u, content, atts, image)
         return jresp(handler, 200, sent)
@@ -5724,15 +5778,19 @@ def route(handler, method):
     m = re.fullmatch(r"/chat/messages/(\d+)", path)
     if m and method == "DELETE":
         u = require_user(handler)
-        if not cm_chat.delete_message(int(m.group(1)), u):
+        staff = bool(u.get("is_admin") or u.get("is_super") or u.get("is_owner"))
+        if not cm_chat.delete_message(cm_social.integer(m.group(1)), u, guard=lambda db:
+                                      cm_social.world_permissions(db, u, staff=staff)):
             raise ApiError(403, "只能删除自己的消息（管理员可删任何人的）")
         return jresp(handler, 200, {"ok": True})
 
     if path == "/chat/image" and method == "POST":
         u = require_user(handler)
+        with cm_social.transaction() as db:
+            cm_social.world_permissions(db, u, sending=True)
         if cm_chat.throttled_image(u["id"]):
             raise ApiError(429, "图片传得太频繁，稍后再试")
-        b = body or {}
+        b = body if isinstance(body, dict) else {}
         try:
             import base64
             raw = base64.b64decode(str(b.get("file") or ""), validate=False)
@@ -5754,17 +5812,13 @@ def route(handler, method):
         return serve_file(handler, fp, ctype, cache="public, max-age=604800")
 
     if path == "/chat/members" and method == "GET":
-        # ?q= 实时搜索（@ 提及选择器）；不带 q 仍返回近期活跃成员
         term = (q.get("q") or "").strip()[:40]
-        if term:
-            return jresp(handler, 200, {"members": cm_chat.search_members(
-                term, limit=int(q.get("limit") or 8))})
-        return jresp(handler, 200, {"members": cm_chat.recent_members(
-            limit=int(q.get("limit") or 20))})
+        limit = cm_social.integer(q.get("limit"), 8 if term else 20)
+        return jresp(handler, 200, {"members": cm_social.world_members(term, max(1, min(20 if term else 50, limit)))})
 
     # 聊天实时流：SSE（?sse=1，经 nginx /cm/live/chat 无缓冲命名空间）或 JSON 增量
     if path == "/chat/live" and method == "GET":
-        since = int(q.get("since") or 0)
+        since = cm_social.integer(q.get("since"))
         if q.get("sse") != "1":
             return jresp(handler, 200, {"events": cm_chat.events_since(since),
                                         "latestSeq": cm_chat.latest_seq()})
@@ -5775,6 +5829,9 @@ def route(handler, method):
         handler.send_header("X-Accel-Buffering", "no")     # 让 nginx 不缓冲
         handler.end_headers()
         last = since
+        resume = handler.headers.get("Last-Event-ID", "")
+        if resume.isascii() and resume.isdecimal() and len(resume) < 19:
+            last = max(last, int(resume))
         deadline = time.time() + 3600
         try:
             handler.wfile.write(b"retry: 3000\n\n")
@@ -6614,6 +6671,8 @@ class Handler(BaseHTTPRequestHandler):
             route(self, method)
         except ApiError as e:
             jresp(self, e.code, {"error": e.msg})
+        except cm_social.Error as e:
+            jresp(self, e.status, {"error": str(e)})
         except cm_rooms.RoomError as e:
             jresp(self, e.status, {"error": str(e)})
         except cm_passport.PassportError as e:
@@ -6729,6 +6788,7 @@ def main():
     _rc = cm_db.connect()
     cm_rooms.init_room_tables(_rc)
     cm_chat.init_chat_tables(_rc)
+    cm_social.init_tables(_rc)
     cm_region.init_region_tables(_rc)
     cm_ai.ensure_bot(AVATAR_DIR)
     _rc.close()

@@ -1,18 +1,4 @@
-// 发现页「Chat」：公共聊天室（v1.28.30）。
-//
-// 设计要点：
-//   · 实时：SSE（/cm/live/chat 无缓冲命名空间）——先拉历史 + latestSeq，再从该
-//     seq 订阅增量；断线由 EventSource 按 id=seq 自动续传。切走 TAB 时关闭连接。
-//   · 身份：消息内联返回 user（昵称/用户名/头像/挂件/头衔/角色），渲染复用
-//     ui.js 的 avatarHTML（自带挂件叠加）与 userTags（头衔+角色徽章）。
-//   · @ 提及：输入 @ 弹出成员选择（/chat/members 近期活跃），选中插入 @昵称；
-//     发送时把「内容里确实出现的 @昵称」换算成 user id 列表（服务端只存 id）。
-//   · 引用：消息头部「引用」按钮把目标消息挂到输入框上方（quoteId 随发送提交，
-//     服务端只存 id、摘要读取时实时生成）；气泡内引用卡可点击回跳原消息。
-//   · @全体成员：管理员专属（服务端 403 强制），选择器置顶提供；消息带
-//     mentionAll 标记，气泡以主题色描边强调。
-//   · 图片：本地 canvas 压到 ≤1280px JPEG（长边）再 base64 上传（服务端 ≤1.5MB、
-//     魔法字节校验），直链由后端 /chat/image/<file> 分发。
+// 发现页社交会话。世界聊天沿用公开 SSE，私有对话使用鉴权增量轮询。
 import { api, auth, call, settings } from './api.js';
 import { esc, avatarHTML, userTags, toast } from './ui.js';
 import { MAX_ATTACH, TYPE_LABEL, attachHTML, bindAttach, openAttachPicker } from './attach.js';
@@ -40,7 +26,9 @@ let myAdmin = false;        // 是否管理员（含超管/站长）：@全体�
 /** 关闭聊天 SSE（切到其它 TAB / 离开发现页时调用，避免连接悬挂）。 */
 let navWatcher = null;
 let pickerDocHandler = null;
+let disposeView = null;
 export function closeChat() {
+  if (disposeView) { disposeView(); disposeView = null; }
   if (es) { try { es.close(); } catch (e) { /* 忽略 */ } es = null; }
   if (pollTimer) { clearInterval(pollTimer); pollTimer = 0; }
   if (navWatcher) { window.removeEventListener('hashchange', navWatcher); navWatcher = null; }
@@ -79,7 +67,7 @@ function quoteExcerpt(m) {
   return t.length > 100 ? t.slice(0, 100) + '…' : t;
 }
 
-function msgHTML(m) {
+function msgHTML(m, scoped) {
   const mine = m.user && m.user.id === myId;
   const isBot = !!(m.user && (m.user.isBot || m.user.is_bot));
   const quote = m.quote
@@ -91,7 +79,9 @@ function msgHTML(m) {
         : `<div class="cm-chatp-text">${contentHTML(m, membersCache)}</div>`)
     : (m.streaming ? '<div class="cm-chatp-typing">正在思考…</div>' : '');
   const img = m.image
-    ? `<img class="cm-chatp-img" src="${esc(settings.base)}/chat/image/${esc(m.image)}" loading="lazy" onclick="window.open(this.src,'_blank')">`
+    ? (scoped
+      ? `<img class="cm-chatp-img" data-chat-image="${esc(m.image)}" alt="聊天图片">`
+      : `<img class="cm-chatp-img" src="${esc(settings.base)}/chat/image/${esc(m.image)}" alt="聊天图片" loading="lazy" onclick="window.open(this.src,'_blank')">`)
     : '';
   return `
   <div class="cm-chatp-msg${mine ? ' mine' : ''}${m.streaming ? ' streaming' : ''}${m.mentionAll ? ' atall' : ''}" data-id="${m.id}"
@@ -104,7 +94,7 @@ function msgHTML(m) {
         ${m.user ? userTags(m.user) : ''}
         <span class="cm-chatp-time">${fmtTime(m.createdAt)}</span>
         ${auth.token ? `<span class="cm-chatp-qt material-icons-outlined" data-qt="${m.id}" title="引用这条消息">format_quote</span>` : ''}
-        ${mine ? `<span class="cm-chatp-del material-icons-outlined" data-del="${m.id}" title="删除">delete</span>` : ''}
+        ${auth.token ? `<button type="button" class="cm-chatp-del material-icons-outlined" data-del="${m.id}" title="删除" aria-label="删除消息" hidden>delete</button>` : ''}
       </div>
       ${(quote || body || img) ? `<div class="cm-chatp-bubble">${quote}${body}${img}</div>` : ''}
       ${m.atts && m.atts.length ? `<div class="cm-chatp-atts">${attachHTML(m.atts, { compact: true })}</div>` : ''}
@@ -159,14 +149,90 @@ function compressImage(file, maxSide = 1280, quality = 0.85) {
   });
 }
 
-export async function mountChat(box) {
+export async function mountChat(box, options = {}) {
   closeChat();
   pickedMentions.clear();
+  membersCache = [];
+  myId = options.userId || 0;
+  const scoped = options.room?.kind === 'direct' || options.room?.kind === 'group';
+  const token = auth.token;
+  const base = settings.base;
+  const path = `/social/conversations/${options.room?.id || 1}`;
+  const request = (method, route, body) => call(method, path + route, { auth: true, body, base });
+  const transport = scoped ? {
+    messages: (before, limit) => request('GET', `/messages?limit=${limit}&before=${before}`),
+    members: q => request('GET', '/members?q=' + encodeURIComponent(q || '')),
+    send: body => request('POST', '/messages', body),
+    remove: id => request('DELETE', '/messages/' + id),
+    upload: body => request('POST', '/images', body),
+    events: since => request('GET', `/events?since=${since}`),
+  } : {
+    messages: api.chatMessages, members: api.chatMembers, send: api.chatSend,
+    remove: api.chatDelete, upload: api.chatUpload,
+    events: since => call('GET', `/chat/live?since=${since}`),
+  };
+  let disposed = false;
+  const active = () => !disposed && box.isConnected && auth.token === token && settings.base === base;
+  const imageUrls = new Map();
+  const imageDialogs = new Set();
+  let fallbackTimer = 0;
+  let rightsTimer = 0;
+  let readTimer = 0;
+  let markWhenVisible = null;
+  const visibilityChanged = () => markWhenVisible?.();
+  document.addEventListener('visibilitychange', visibilityChanged);
+  disposeView = () => {
+    disposed = true;
+    clearTimeout(fallbackTimer);
+    clearTimeout(readTimer);
+    clearInterval(rightsTimer);
+    document.removeEventListener('visibilitychange', visibilityChanged);
+    imageUrls.forEach(requested => requested.then(url => URL.revokeObjectURL(url)).catch(() => {}));
+    imageUrls.clear();
+    imageDialogs.forEach(dialog => dialog.remove());
+    imageDialogs.clear();
+  };
+  let canSend = options.room ? options.room.canSend : !!token;
+  let canDelete = options.room?.canDelete ?? !!token;
+  myAdmin = !!options.room?.canModerate;
+  const privateImage = (node, image) => {
+    if (!active() || !/^[a-f0-9]{32}\.(?:jpg|png|gif|webp)$/.test(image)) return;
+    if (!imageUrls.has(image)) {
+      const promise = fetch(base + path + '/images/' + image, {
+        headers: { Authorization: 'Bearer ' + token }, cache: 'no-store', redirect: 'error',
+      }).then(response => {
+        if (!response.ok) throw new Error('图片暂不可用');
+        return response.blob();
+      }).then(blob => URL.createObjectURL(blob)).catch(error => {
+        imageUrls.delete(image);
+        throw error;
+      });
+      imageUrls.set(image, promise);
+    }
+    imageUrls.get(image).then(url => {
+      if (!active() || !node.isConnected) return;
+      node.src = url;
+      node.onclick = () => {
+        if (!active()) return;
+        const dialog = document.createElement('mdui-dialog');
+        const preview = document.createElement('img');
+        preview.src = url;
+        preview.alt = '聊天图片';
+        preview.className = 'cm-social-image-preview';
+        dialog.append(preview);
+        document.body.append(dialog);
+        dialog.open = true;
+        imageDialogs.add(dialog);
+        dialog.addEventListener('closed', () => { imageDialogs.delete(dialog); dialog.remove(); }, { once: true });
+      };
+    }).catch(() => { node.alt = '图片暂不可用'; });
+  };
   // Chat 有自己的消息滚动区，整页下拉刷新只会打断阅读/输入；本 TAB 内禁用全局 PTR
   ptrHost = document.getElementById('out');
   if (ptrHost) ptrHost.setAttribute('data-ptr-ignore', '');
   // 离开发现页（如点进用户主页）时关闭后台连接；TAB 内切换由 closeChat 负责
-  navWatcher = () => { if (!/^#\/square/.test(location.hash || '')) closeChat(); };
+  const chatHash = location.hash;
+  navWatcher = () => { if (location.hash !== chatHash && !disposed) closeChat(); };
   window.addEventListener('hashchange', navWatcher);
   box.innerHTML = `
     <div class="cm-chatp" data-ptr-ignore>
@@ -178,7 +244,7 @@ export async function mountChat(box) {
       <div class="cm-chatp-picker" id="chatPicker"></div>
       <div class="cm-chatp-suggest" id="chatSuggest" hidden></div>
       <div class="cm-chatp-quotebar" id="chatQuoteBar" hidden></div>
-      <div class="cm-chatp-composer">
+      <div class="cm-chatp-composer" ${canSend ? '' : 'hidden'}>
         <button class="cm-chatp-tool material-icons-outlined" id="chatAddBtn" title="添加内容" aria-label="添加内容" aria-expanded="false">add</button>
         <div class="cm-chatp-addmenu" id="chatAddMenu" hidden>
           <button type="button" data-add="image"><span class="material-icons-outlined">image</span>图片</button>
@@ -187,11 +253,12 @@ export async function mountChat(box) {
         <input type="file" id="chatImgFile" accept="image/*" style="display:none">
         <div class="cm-chatp-inputwrap">
           <textarea id="chatInput" rows="1" enterkeyhint="send"
-            placeholder="${auth.token ? '发消息…（@ 提及）' : '登录后即可聊天'}" ${auth.token ? '' : 'disabled'}></textarea>
+            placeholder="${token ? '发消息…（@ 提及）' : '登录后即可聊天'}" ${canSend ? '' : 'disabled'}></textarea>
           <div class="cm-chatp-preview" id="chatPreview" style="display:none"></div>
         </div>
-        <mdui-button variant="filled" id="chatSend" ${auth.token ? '' : 'disabled'}>发送</mdui-button>
+        <mdui-button variant="filled" id="chatSend" ${canSend ? '' : 'disabled'}>发送</mdui-button>
       </div>
+      <div class="cm-social-readonly" role="status" hidden></div>
     </div>`;
 
   // 聊天区高度：按 #out 的真实可见区域计算（含移动端键盘用 visualViewport 收缩），
@@ -260,6 +327,42 @@ export async function mountChat(box) {
   const suggest = box.querySelector('#chatSuggest');
   const preview = box.querySelector('#chatPreview');
   const quoteBar = box.querySelector('#chatQuoteBar');
+
+  const readOnly = box.querySelector('.cm-social-readonly');
+  function updateRights(room) {
+    if (room) {
+      canSend = room.canSend;
+      canDelete = room.canDelete ?? !!token;
+      myAdmin = room.canModerate;
+      options.onRights?.(room);
+      readOnly.textContent = room.removed ? '你已被移出世界聊天，可以继续阅读公开消息'
+        : room.mutedUntil * 1000 > Date.now() ? '禁言中' : '当前会话仅可查看';
+    } else {
+      if (!readOnly.textContent) readOnly.textContent = '登录后即可聊天';
+    }
+    composer.hidden = !canSend;
+    composer.classList.toggle('cm-social-hidden', !canSend);
+    readOnly.hidden = canSend;
+    input.disabled = !canSend;
+    sendBtn.disabled = !canSend;
+    msgsEl.querySelectorAll('[data-del]').forEach(button => {
+      const node = button.closest('[data-id]');
+      button.hidden = !canDelete || (!myAdmin && +node.dataset.uid !== myId);
+    });
+    msgsEl.querySelectorAll('[data-qt]').forEach(button => { button.hidden = !canSend; });
+  }
+  updateRights(options.room);
+  if (options.room && token) {
+    rightsTimer = setInterval(async () => {
+      if (!active() || document.hidden) return;
+      try {
+        const { conversation } = await request('GET', '');
+        if (active()) updateRights(conversation);
+      } catch (e) {
+        if (active() && scoped && [401, 403, 404].includes(e.status)) options.onLost?.(e);
+      }
+    }, 10000);
+  }
 
   // ---- 引用状态：目标消息挂在输入框上方，随发送提交 quoteId ----
   let quotedMsg = null;             // {id, nickname, excerpt}
@@ -381,6 +484,7 @@ export async function mountChat(box) {
 
   /** 引用卡片并 @AI 时，在输入框上方给出「猜你想问」。 */
   function updateSuggest() {
+    if (scoped) return;
     if (!aiMentioned()) { suggest.hidden = true; suggest.innerHTML = ''; return; }
     const card = pendingAtts[0];
     const qs = pendingImage ? SUGGEST.image
@@ -448,7 +552,8 @@ export async function mountChat(box) {
       let list = mentionCache.get(q);
       if (!list) {
         try {
-          const d = await api.chatMembers(q);
+          const d = await transport.members(q);
+          if (!active()) return;
           list = (d && d.members) || [];
           mentionCache.set(q, list);
           mergeMembers(list);
@@ -467,35 +572,57 @@ export async function mountChat(box) {
   };
   document.addEventListener('click', pickerDocHandler);
 
-  if (auth.token) {
+  if (token && !options.userId) {
     api.me().then(u => {
+      if (!active()) return;
       myId = (u && u.id) || 0;
-      myAdmin = !!(u && (u.isAdmin || u.isSuper || u.isOwner));   // @全体成员 仅管理员可选
+      if (!options.room) myAdmin = !!(u && (u.isAdmin || u.isSuper || u.isOwner));   // @全体成员 仅管理员可选
       // 历史消息先于 me 渲染：补上「我的消息」高亮
       msgsEl.querySelectorAll('.cm-chatp-msg').forEach(n => {
         if (+n.dataset.uid === myId) n.classList.add('mine');
       });
+      updateRights(options.room);
     }).catch(() => {});
   }
 
   // ---- 成员（@ 选择器 + 高亮）----
-  api.chatMembers().then(d => mergeMembers((d && d.members) || [])).catch(() => {});
+  if (token) transport.members().then(d => { if (active()) mergeMembers(d?.members || []); }).catch(() => {});
 
   // ---- 消息渲染 ----
-  let oldest = 0, count = 0;
+  let oldest = 0, latestMessage = 0, marked = 0;
   const msgMap = new Map();       // id -> message：点「引用」时取原消息（含摘要素材）
   const nearBottom = () => list.scrollHeight - list.scrollTop - list.clientHeight < 120;
   const scrollBottom = () => { list.scrollTop = list.scrollHeight; };
+  markWhenVisible = () => {
+    if (!active() || !options.room || !token || document.hidden || !nearBottom() || latestMessage <= marked) return;
+    clearTimeout(readTimer);
+    readTimer = setTimeout(async () => {
+      if (!active() || document.hidden || !nearBottom()) return;
+      const mid = latestMessage;
+      try {
+        await request('PUT', '/read', { messageId: mid });
+        if (active()) marked = Math.max(mid, marked);
+      } catch { /* 下次可见时重试 */ }
+    }, 250);
+  };
+  list.addEventListener('scroll', markWhenVisible, { passive: true });
 
   function appendMsg(m) {
     if (msgsEl.querySelector(`[data-id="${m.id}"]`)) return;      // SSE 与发送响应去重
     msgMap.set(m.id, m);
-    msgsEl.insertAdjacentHTML('beforeend', msgHTML(m));
+    msgsEl.insertAdjacentHTML('beforeend', msgHTML(m, scoped));
     const node = msgsEl.lastElementChild;
     if (node && m.atts && m.atts.length) bindAttach(node, m.atts);
-    count++; emptyEl.style.display = 'none';
+    latestMessage = Math.max(latestMessage, m.id);
+    emptyEl.style.display = 'none';
   }
   function bindMsgs() {
+    updateRights();
+    msgsEl.querySelectorAll('[data-chat-image]').forEach(node => {
+      if (node.dataset.bound) return;
+      node.dataset.bound = '1';
+      privateImage(node, node.dataset.chatImage);
+    });
     msgsEl.querySelectorAll('.cm-chatp-nick').forEach(el => {
       if (el.dataset.uid && el.dataset.uid !== '0' && !el.dataset.b) {
         el.dataset.b = '1';
@@ -537,7 +664,7 @@ export async function mountChat(box) {
       if (el.dataset.b) return; el.dataset.b = '1';
       el.onclick = async () => {
         if (!confirm('删除这条消息？')) return;
-        try { await api.chatDelete(+el.dataset.del); msgsEl.querySelector(`[data-id="${el.dataset.del}"]`)?.remove(); }
+        try { await transport.remove(+el.dataset.del); if (active()) removeMessage(+el.dataset.del); }
         catch (e) { toast(e.message || '删除失败'); }
       };
     });
@@ -568,18 +695,35 @@ export async function mountChat(box) {
     });
   }
 
-  // ---- 历史 + 增量订阅 ----
-  try {
-    const d = await api.chatMessages(0, PAGE);
-    (d.messages || []).forEach(appendMsg);
-    oldest = (d.messages || [])[0] ? d.messages[0].id : 0;
-    moreEl.style.display = oldest ? '' : 'none';
-    bindMsgs(); scrollBottom();
-  } catch (e) { toast(e.message || '聊天记录加载失败'); }
-
-  // ---- 实时增量：SSE 优先，不可用时退化为 3s 轮询（旧 WebView/被中间层掐流） ----
   let since = 0;
   let sseOk = false;
+  function removeMessage(id) {
+    const message = msgMap.get(id);
+    if (scoped && message?.image) {
+      const pending = imageUrls.get(message.image);
+      if (pending) pending.then(url => URL.revokeObjectURL(url)).catch(() => {});
+      imageUrls.delete(message.image);
+    }
+    msgMap.delete(id);
+    msgsEl.querySelector(`[data-id="${id}"]`)?.remove();
+    if (!msgMap.size) emptyEl.style.display = '';
+  }
+  async function loadHistory() {
+    const d = await transport.messages(0, PAGE);
+    if (!active()) return;
+    if (scoped) since = d.latestSeq || 0;
+    msgMap.clear();
+    latestMessage = 0;
+    msgsEl.innerHTML = '';
+    emptyEl.style.display = '';
+    (d.messages || []).forEach(appendMsg);
+    oldest = d.messages?.[0]?.id || 0;
+    moreEl.style.display = oldest ? '' : 'none';
+    bindMsgs();
+    scrollBottom();
+    markWhenVisible();
+  }
+
   function updateMessage(p) {
     const el = msgsEl.querySelector(`.cm-chatp-msg[data-id="${p.id}"]`);
     if (!el) return;
@@ -626,63 +770,85 @@ export async function mountChat(box) {
     if (stick) scrollBottom();
   }
 
-  const applyEvent = ev => {
+  const applyEvent = raw => {
+    if (!active()) return;
+    if (raw.type === 'message') {
+      const stick = nearBottom();
+      appendMsg(raw.payload);
+      bindMsgs();
+      if (stick) scrollBottom();
+      markWhenVisible();
+    } else if (raw.type === 'edit') {
+      updateMessage(raw.payload);
+    } else if (raw.type === 'delete') {
+      removeMessage(raw.payload.id);
+    }
+    if (raw.seq) since = Math.max(since, raw.seq);
+  };
+  const applyFrame = ev => {
+    try { applyEvent(JSON.parse(ev.data)); } catch { /* 跳过坏帧 */ }
+  };
+  let polling = false;
+  async function poll() {
+    if (polling || !active() || document.hidden) return;
+    polling = true;
     try {
-      const raw = JSON.parse(ev.data);
-      const type = ev.type;
-      if (type === 'message') {
-        const stick = nearBottom();
-        appendMsg(raw.payload); bindMsgs();
-        if (stick) scrollBottom();
-      } else if (type === 'edit') {
-        updateMessage(raw.payload);
-      } else if (type === 'delete') {
-        msgMap.delete(raw.payload.id);
-        msgsEl.querySelector(`[data-id="${raw.payload.id}"]`)?.remove();
+      const d = await transport.events(since);
+      if (!active()) return;
+      if (d.reset) await loadHistory();
+      else {
+        (d.events || []).forEach(applyEvent);
+        since = Math.max(since, d.cursor || 0);
       }
-      if (raw.seq) since = Math.max(since, raw.seq);
-    } catch (e) { /* 忽略坏帧 */ }
-  };
-  const startPolling = () => {
-    if (pollTimer) return;
-    pollTimer = setInterval(async () => {
-      if (!box.isConnected) { clearInterval(pollTimer); pollTimer = 0; return; }   // 已离开
-      try {
-        const d = await call('GET', `/chat/live?since=${since}`);
-        (d.events || []).forEach(e => applyEvent({ type: e.type, data: JSON.stringify(e) }));
-      } catch (e) { /* 静默：下次再试 */ }
-    }, 3000);
-  };
-
-  try {
-    const live = await call('GET', '/chat/live').catch(() => null);
-    since = (live && live.latestSeq) || 0;
-    es = new EventSource(`${settings.base}/live/chat?sse=1&since=${since}`);
-    es.addEventListener('message', applyEvent);
-    es.addEventListener('delete', applyEvent);
-    es.addEventListener('edit', applyEvent);
-    es.addEventListener('open', () => {
-      sseOk = true;
-      if (pollTimer) { clearInterval(pollTimer); pollTimer = 0; }   // SSE 恢复：停轮询
-    });
-    es.addEventListener('error', () => {
-      // EventSource 会自动重连；连续失败（readyState=CLOSED）时切轮询兜底
-      if (es && es.readyState === EventSource.CLOSED) { sseOk = false; startPolling(); }
-    });
-  } catch (e) {
-    sseOk = false;
-    startPolling();
+      markWhenVisible();
+    } catch (e) {
+      if (active() && scoped && [401, 403, 404].includes(e.status)) options.onLost?.(e);
+    } finally { polling = false; }
   }
-  if (!sseOk) setTimeout(() => { if (!sseOk && !pollTimer) startPolling(); }, 5000);
+  const startPolling = () => {
+    if (pollTimer || !active()) return;
+    pollTimer = setInterval(poll, 3000);
+    poll();
+  };
+  async function start() {
+    if (!scoped) {
+      try { since = (await transport.events(0)).latestSeq || 0; } catch { /* 继续加载历史 */ }
+    }
+    if (!active()) return;
+    try { await loadHistory(); }
+    catch (e) {
+      if (!active()) return;
+      if (scoped && [401, 403, 404].includes(e.status)) { options.onLost?.(e); return; }
+      emptyEl.textContent = e.message || '聊天记录加载失败';
+    }
+    if (!active()) return;
+    if (scoped) { startPolling(); return; }
+    try {
+      es = new EventSource(`${base}/live/chat?sse=1&since=${since}`);
+      ['message', 'delete', 'edit'].forEach(type => es.addEventListener(type, applyFrame));
+      es.addEventListener('open', () => {
+        if (!active()) return;
+        sseOk = true;
+        if (pollTimer) { clearInterval(pollTimer); pollTimer = 0; }
+      });
+      es.addEventListener('error', () => {
+        sseOk = false;
+        startPolling();
+      });
+    } catch { startPolling(); }
+    if (!sseOk) fallbackTimer = setTimeout(() => { if (!sseOk) startPolling(); }, 5000);
+  }
+  start();
 
   moreEl.onclick = async () => {
     if (!oldest) return;
     try {
-      const d = await api.chatMessages(oldest, PAGE);
+      const d = await transport.messages(oldest, PAGE);
+      if (!active()) return;
       const list2 = (d.messages || []);
       if (!list2.length) { moreEl.style.display = 'none'; return; }
       const keep = list.scrollHeight - list.scrollTop;
-      msgsEl.insertAdjacentHTML('afterbegin', list2.map(msgHTML).join(''));
+      msgsEl.insertAdjacentHTML('afterbegin', list2.map(message => msgHTML(message, scoped)).join(''));
       list2.forEach(m => {
         msgMap.set(m.id, m);
         const node = msgsEl.querySelector(`.cm-chatp-msg[data-id="${m.id}"]`);
@@ -704,8 +870,10 @@ export async function mountChat(box) {
     preview.style.display = has ? '' : 'none';
     if (!has) { preview.innerHTML = ''; return; }
     preview.innerHTML = `
-      ${pendingImage ? `<span class="cm-chatp-pend-img"><img src="${esc(settings.base)}/chat/image/${esc(pendingImage)}"><span class="cm-chatp-rm material-icons-outlined" data-rmimg>close</span></span>` : ''}
+      ${pendingImage ? `<span class="cm-chatp-pend-img"><img alt="待发送图片" ${scoped ? 'data-pending-image' : `src="${esc(base)}/chat/image/${esc(pendingImage)}"`}><span class="cm-chatp-rm material-icons-outlined" data-rmimg>close</span></span>` : ''}
       ${pendingAtts.map((a, i) => `<span class="cm-peditor-att">${esc(TYPE_LABEL[a.type] || '')}·${esc(a.name)}<span class="material-icons-outlined" data-rmatt="${i}">close</span></span>`).join('')}`;
+    const pendingNode = preview.querySelector('[data-pending-image]');
+    if (pendingNode) privateImage(pendingNode, pendingImage);
     const rmImg = preview.querySelector('[data-rmimg]');
     if (rmImg) rmImg.onclick = () => { pendingImage = ''; setPreview(); };
     preview.querySelectorAll('[data-rmatt]').forEach(x => {
@@ -714,24 +882,40 @@ export async function mountChat(box) {
     updateSuggest();
   };
 
+  let sending = false;
+  let lastDraft = '';
+  let clientId = '';
   async function doSend() {
+    if (sending || !canSend || !active()) return;
     if (uploadingImage) return toast('图片还在处理中，稍等一下再发送');
     const content = input.value.trim();
     if (!content && !pendingImage && !pendingAtts.length) return;
     if (!auth.token) return toast('登录后即可聊天');
+    sending = true;
     sendBtn.setAttribute('loading', '');
     try {
       // mentionAll 只在文本真的带 @全体成员 时提交（服务端还会再校验管理员）
-      const m = await api.chatSend({ content, image: pendingImage, mentions: mentionsFromContent(content), atts: pendingAtts,
+      const message = { content, image: pendingImage, mentions: mentionsFromContent(content), atts: pendingAtts,
         quoteId: quotedMsg ? quotedMsg.id : 0,
-        mentionAll: myAdmin && content.includes('@全体成员') });
-      appendMsg(m); bindMsgs(); scrollBottom();
+        mentionAll: myAdmin && content.includes('@全体成员') };
+      if (scoped) {
+        const draft = JSON.stringify(message);
+        if (draft !== lastDraft) {
+          clientId = Array.from(crypto.getRandomValues(new Uint32Array(4)), n => n.toString(16)).join('-');
+          lastDraft = draft;
+        }
+        message.clientId = clientId;
+      }
+      const m = await transport.send(message);
+      if (!active()) return;
+      lastDraft = '';
+      appendMsg(m); bindMsgs(); scrollBottom(); markWhenVisible();
       input.value = ''; growInput();
       pendingImage = ''; pendingAtts = []; pickedMentions.clear(); closeAddMenu(); setPreview();
       setQuote(null);
     } catch (e) {
       toast(e.message || '发送失败');
-    } finally { sendBtn.removeAttribute('loading'); }
+    } finally { sending = false; sendBtn.removeAttribute('loading'); }
   }
   sendBtn.onclick = doSend;
   input.addEventListener('keydown', e => {
@@ -762,7 +946,7 @@ export async function mountChat(box) {
     growInput();
     const before = input.value.slice(0, input.selectionStart || 0);
     const m = /@([^\s@]{0,20})$/.exec(before);
-    if (!auth.token || !m) { if (!m) hidePicker(); updateSuggest(); return; }
+    if (!canSend || !m) { if (!m) hidePicker(); updateSuggest(); return; }
     const q = m[1];
     // 先给本地候选（不等网络）；随后服务端在 180ms 防抖后补全搜索结果
     const kw = q.toLowerCase();
@@ -806,8 +990,8 @@ export async function mountChat(box) {
     toast('图片处理中…');
     try {
       const b64 = await compressImage(f);
-      const d = await api.chatUpload({ file: b64, filename: 'chat.jpg', contentType: 'image/jpeg' });
-      pendingImage = d.image; setPreview();
+      const d = await transport.upload({ file: b64, filename: 'chat.jpg', contentType: 'image/jpeg' });
+      if (active()) { pendingImage = d.image; setPreview(); }
     } catch (e) { toast(e.message || '图片上传失败'); }
     finally { uploadingImage = false; }
   };
