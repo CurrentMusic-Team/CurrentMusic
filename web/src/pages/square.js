@@ -2,7 +2,8 @@
 import { api } from '../api.js';
 import { esc, toast, avatarHTML, fmtListen, userTags, skelUsers } from '../ui.js';
 import { mountPosts } from '../posts.js';
-import { closeChat } from '../chat.js';
+import { closeSocial, mountSocial } from './social.js';
+import { socialURL } from '../social-api.js';
 
 const SORTS = [
   { key: 'composite', label: '综合排序' },
@@ -19,12 +20,18 @@ const PAGE = 30;
 
 const TAB_KEY = 'cm.sqTab';
 // 默认落在「音乐」（发现页的主体是找歌）；TAB 顺序用于判断切换方向 → 决定入场动画往哪边滑
-const TAB_ORDER = ['music', 'users', 'posts', 'chat'];
+const TAB_ORDER = ['music', 'users', 'posts', 'social'];
 const DEFAULT_TAB = 'music';
 
 /** TAB 切换：记住选择（会话级）。posts 走独立模块，users 用本文件原有逻辑。 */
 function switchTab(k) {
   const cur = sessionStorage.getItem(TAB_KEY) || DEFAULT_TAB;
+  if (k === 'social' || /[?&]tab=(?:social|chat)(?:&|$)/.test(location.hash)) {
+    sessionStorage.setItem(TAB_KEY, k);
+    const target = k === 'social' ? socialURL() : '#/square?tab=' + k;
+    if (location.hash !== target) location.hash = target;
+    return;
+  }
   const dir = TAB_ORDER.indexOf(k) >= TAB_ORDER.indexOf(cur) ? 1 : -1;
   sessionStorage.setItem(TAB_KEY, k);
   const out = document.getElementById('out');
@@ -34,6 +41,7 @@ function switchTab(k) {
 }
 
 export async function render(el, params, state = {}) {
+  closeSocial();
   const query = state.query ?? ((params && params.q) || '');
   const requestedSort = state.sort ?? sessionStorage.getItem('cm.sqSort');
   const sort = SORTS.some(s => s.key === requestedSort) ? requestedSort : 'composite';
@@ -46,6 +54,7 @@ export async function render(el, params, state = {}) {
   const q = (params && params.query) || {};
   const fromQuery = (typeof q.get === 'function' ? q.get('tab') : q.tab) || '';
   let tab = state.tab || fromQuery || sessionStorage.getItem(TAB_KEY) || DEFAULT_TAB;
+  if (tab === 'chat') tab = 'social';
   if (!TAB_ORDER.includes(tab)) tab = DEFAULT_TAB;      // 非法值不再静默落到「用户」
   // 入场方向：0 = 首帧（只淡入），±1 = 左右滑入
   const dir = state.dir || 0;
@@ -56,12 +65,11 @@ export async function render(el, params, state = {}) {
         <button class="cm-sqtab${tab === 'music' ? ' on' : ''}" data-k="music">音乐</button>
         <button class="cm-sqtab${tab === 'users' ? ' on' : ''}" data-k="users">用户</button>
         <button class="cm-sqtab${tab === 'posts' ? ' on' : ''}" data-k="posts">帖子</button>
-        <button class="cm-sqtab${tab === 'chat' ? ' on' : ''}" data-k="chat">Chat</button>
+        <button class="cm-sqtab${tab === 'social' ? ' on' : ''}" data-k="social">社交</button>
       </div>`;
 
   if (tab === 'music') {
     // 音乐 TAB：Banner / 推荐歌单 / 推荐新歌 / 榜单 / 曲风 / 独家放送
-    closeChat();                                        // 切走聊天 TAB：关闭其 SSE 连接
     el.innerHTML = tabs + `<div class="${paneCls}" id="sqMusicBox"></div>`;
     el.querySelectorAll('#sqTabs .cm-sqtab').forEach(b => { b.onclick = () => switchTab(b.dataset.k); });
     const { mountDiscover } = await import('../discover.js');
@@ -71,23 +79,20 @@ export async function render(el, params, state = {}) {
 
   if (tab === 'posts') {
     // 帖子 TAB：只保留 TAB 栏 + 帖子容器（用户广场那套排序/筛选不显示）
-    closeChat();
     el.innerHTML = tabs + `<div class="${paneCls}" id="sqPostBox"></div>`;
     el.querySelectorAll('#sqTabs .cm-sqtab').forEach(b => { b.onclick = () => switchTab(b.dataset.k); });
     mountPosts(el.querySelector('#sqPostBox'));
     return;
   }
 
-  if (tab === 'chat') {
-    // Chat TAB：公共聊天室（SSE 实时 + 文本/图片/@ 提及，独立模块）
-    el.innerHTML = tabs + `<div class="${paneCls}" id="sqChatBox"></div>`;
+  if (tab === 'social') {
+    el.innerHTML = tabs + `<div class="${paneCls}" id="sqSocialBox"></div>`;
     el.querySelectorAll('#sqTabs .cm-sqtab').forEach(b => { b.onclick = () => switchTab(b.dataset.k); });
-    const { mountChat } = await import('../chat.js');
-    mountChat(el.querySelector('#sqChatBox'));
+    const selected = typeof q.get === 'function' ? q.get('conversation') : q.conversation;
+    mountSocial(el.querySelector('#sqSocialBox'), selected);
     return;
   }
 
-  closeChat();                                          // 用户 TAB 同样要断开聊天流
   el.innerHTML = tabs + `
     <div class="${paneCls} cm-sqpage">
     <div class="cm-sq-stats" id="sqStats"><span class="material-icons-outlined">groups</span>正在统计…</div>

@@ -1,6 +1,6 @@
 # 聊天室消息、SSE 与互动
 
-「发现 → Chat」是一个全局公共聊天室：HTTP 接口负责历史与发言，`GET /chat/live` 以 SSE（或 JSON 增量）推送实时事件。以下路径以 `/cm` 为基址；除历史/图片/成员查询外均需 `Authorization: Bearer <CurrentMusic 会话令牌>`。请求 JSON 使用 `Content-Type: application/json`。
+「发现 → 社交 → 世界聊天」是流声音乐官方公共聊天室：HTTP 接口负责历史与发言，`GET /chat/live` 以 SSE（或 JSON 增量）推送实时事件。以下路径以 `/cm` 为基址；除历史/图片/成员查询外均需 `Authorization: Bearer <CurrentMusic 会话令牌>`。请求 JSON 使用 `Content-Type: application/json`。好友、群资料和私有对话见[社交接口](social-api.md)。
 
 ## 接口一览
 
@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | GET | `/chat/messages` | 公开。`before=<消息id>`（向更早翻页，缺省取最新）、`limit` 1–50（默认 30）。返回 `{messages}`，**时间升序**。 |
 | POST | `/chat/messages` | 登录。`{content, image?, mentions?, atts?, quoteId?, mentionAll?}`（详见下节）。返回完整的消息对象（与 SSE `message` 事件 payload 同构）。 |
-| DELETE | `/chat/messages/{id}` | 登录。本人或管理员软删除，返回 `{ok:true}`；SSE 广播 `delete` 事件。 |
+| DELETE | `/chat/messages/{id}` | 登录。本人、群管理者或有审核权限的站点管理员可软删除，返回 `{ok:true}`；SSE 广播 `delete` 事件。 |
 | POST | `/chat/image` | 登录。`{file: <base64>, filename, contentType}`，返回 `{image, url}`；解码后 ≤1.5MB，魔法字节校验 jpg/png/gif/webp。同一用户两次传图至少间隔 5 秒（429）。 |
 | GET | `/chat/image/{file}` | 公开。聊天图片直链，缓存 7 天。 |
 | GET | `/chat/members` | 公开。`?q=` 按公开昵称模糊搜索（@ 提及选择器默认 8 条）；不带 `q` 返回近 7 天活跃成员（不足用最新注册补齐）。只返回「公开到广场」的启用用户及 AI 助手。 |
@@ -25,7 +25,7 @@
 | mentions | number[] | 被 @ 的用户 id 列表：正整数、去重、最多 10 个；服务端只存 id，昵称读取时实时关联。 |
 | atts | array | 引用内容卡片 `[{type:'song'|'album'|'artist'|'playlist', id, name, sub?, pic?}]`，最多 5 项；`pic` 只接受 http(s)。 |
 | quoteId | number | **引用某条消息**：被引用消息必须存在且未删除（否则 400「引用的消息不存在或已删除」）。服务端只存 id。 |
-| mentionAll | boolean | **@全体成员**：仅管理员（含超管/站长）可用，普通用户返回 403「只有管理员可以 @全体成员」；且 `content` 必须包含 `@全体成员` 文本（400）。 |
+| mentionAll | boolean | **@全体成员**：群管理者或有审核权限的站点管理员可用，普通用户返回 403「只有管理员可以 @全体成员」；且 `content` 必须包含 `@全体成员` 文本（400）。 |
 
 `content`、`image`、`atts` 至少有一项非空，否则 400「说点什么、带张图，或引用一首歌吧」。同一用户两次发言至少间隔 1.5 秒（429「发言太快啦，歇一下」）。
 
@@ -72,7 +72,7 @@
 ## 客户端实现提示
 
 - @ 提及：本地先过滤近期成员，再以 180ms 防抖调 `/chat/members?q=`；发送前把「内容里确实出现的 `@昵称`」换算成 id 列表。长按他人头像可快捷插入 `@昵称`。
-- @全体成员：选择器对管理员置顶展示「@全体成员」项；普通用户手打该文本只会得到普通消息（`mentionAll` 不会被置真），界面高亮仅是展示层行为。
+- @全体成员：选择器对有群消息管理权限的用户置顶展示「@全体成员」项；普通用户手打该文本只会得到普通消息（`mentionAll` 不会被置真），界面高亮仅是展示层行为。
 - 引用交互：消息头部「引用」按钮把目标消息挂到输入框上方（可取消），发送时带 `quoteId`；气泡内引用卡可点击回跳原消息，原消息不在当前列表时给降级提示。
 - 图片：发送前建议本地压缩（如长边 1280px JPEG）再 base64 上传，与 1.5MB 服务端上限匹配。
 - 删除：软删除后列表接口不再返回该消息；引用它的消息不受影响。

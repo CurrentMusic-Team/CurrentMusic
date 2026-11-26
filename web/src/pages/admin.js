@@ -3,6 +3,7 @@
 // 这页的数据量小但区块多，旧实现每次搜索/分页/操作都 render(el) 整页重画：
 // 输入框失焦、TAB 位置丢失、图表闪一下白屏。现在页面只渲染一次外壳，
 // 各 TAB 各自懒加载、各自局部刷新；用户搜索回车触发，只更新列表与分页。
+import { mountSocialReports } from './admin-social.js';
 import { mdui } from '../md.js';
 import { api, auth, settings } from '../api.js';
 import { bindDonationDestination, donationDestinationFields, donationDestinationLabel } from '../donation-destination.js';
@@ -44,10 +45,12 @@ const TABS = [
   { k: 'devices', label: '设备', icon: 'devices' },
   { k: 'clients', label: '客户端', icon: 'phone_android' },
   { k: 'ai', label: 'AI 管理', icon: 'auto_awesome' },
+  { k: 'social', label: '社交举报', icon: 'flag' },
   { k: 'diagnostics', label: '反馈诊断', icon: 'feedback' },
   { k: 'system', label: '系统', icon: 'settings' },
 ];
 const TAB_DESC = {
+  social: '查看并处理好友举报',
   overview: '站点运营总览、流量与趋势',
   users: '搜索、分页与账号操作',
   donations: '捐赠用户列表：金额、次数与交易单号',
@@ -280,6 +283,10 @@ export async function render(el, params) {
         </div>
       </section>
 
+      <section class="cm-apane" data-pane="social" id="pane-social" hidden>
+        <div data-social-reports></div>
+      </section>
+
       <section class="cm-apane" data-pane="diagnostics" id="pane-diagnostics" ${S.tab !== 'diagnostics' ? 'hidden' : ''}>
         <form class="cm-adminbar cm-ausearch" id="feedbackDiagnosticsForm">
           <mdui-text-field id="feedbackDiagnosticsId" label="附件标识" maxlength="32" autocomplete="off" spellcheck="false"></mdui-text-field>
@@ -381,6 +388,7 @@ export async function render(el, params) {
       loadAi();
       loadAiHistory();
     } else if (k === 'system') renderSystem();
+    if (k === 'social') mountSocialReports(el.querySelector('[data-social-reports]'));
   };
   el.querySelectorAll('.cm-atab').forEach(b => { b.onclick = () => setTab(b.dataset.tab); });
 
