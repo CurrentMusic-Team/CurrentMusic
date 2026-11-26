@@ -5,6 +5,7 @@
 // 各 TAB 各自懒加载、各自局部刷新；用户搜索回车触发，只更新列表与分页。
 import { mdui } from '../md.js';
 import { api, auth, settings } from '../api.js';
+import { bindDonationDestination, donationDestinationFields, donationDestinationLabel } from '../donation-destination.js';
 import { rememberFeedbackDiagnostics } from '../auth-flow.js';
 import { renderMarkdown } from '../markdown.js';
 import { esc, toast, confirmDialog, promptDialog, userTags, fmtCount, avatarHTML } from '../ui.js';
@@ -921,12 +922,15 @@ export async function render(el, params) {
             if (k === 'ai-history') viewAiUser(id);
             else if (k === 'kick') { const r = await api.adminKick(id); toast(`已踢下线（${r.kicked} 个会话）`); await afterUserChange(); }
             else if (k === 'donate') {
+              const recipients = S.don?.recipients ?? (await api.donationInfo()).recipients;
+              const destinationOptions = { optional: true };
               const diag = mdui.dialog({
                 headline: `为「${u.nickname || u.username}」代录捐赠`,
                 body: `<div class="cm-donate-form" style="padding:0 8px">
                   <mdui-text-field id="dnAmount" label="捐赠金额（元）" variant="outlined" type="number" min="0.01" max="100000" step="0.01"></mdui-text-field>
                   <mdui-text-field id="dnTxn" label="交易单号（可选，留空自动生成）" variant="outlined" maxlength="64"></mdui-text-field>
                   <mdui-text-field id="dnNote" label="备注（可选）" variant="outlined" maxlength="120"></mdui-text-field>
+                  ${donationDestinationFields(recipients, destinationOptions)}
                   <div class="cm-donate-hint">用于线下捐赠等用户无法自助提交的场景；账号信息以服务端记录为准，记录会带「代录」标记。</div>
                 </div>`,
                 actions: [
@@ -937,13 +941,20 @@ export async function render(el, params) {
                     const note = (diag.querySelector('#dnNote').value || '').trim();
                     if (!isFinite(amount) || amount < 0.01) { toast('请填写 0.01 元以上的金额'); return false; }
                     try {
-                      const r = await api.adminCreateDonation({ userId: id, amount, txnId: txn || undefined, note });
+                      const r = await api.adminCreateDonation({
+                        userId: id, amount, txnId: txn || undefined, note, ...readDestination(),
+                      });
                       toast(`已代录，单号 ${r.txnId}`);
                       if (S.tab === 'donations') await loadDonations({ silent: true });
+                      else {
+                        S.don = null;
+                        S.donSeq++;
+                      }
                     } catch (e) { toast(e.message); return false; }
                   } },
                 ],
               });
+              const readDestination = bindDonationDestination(diag, recipients, destinationOptions);
             }
             else if (k === 'disable') { await api.adminDisable(id, true); toast('已禁用，其所有会话已作废'); await afterUserChange(); }
             else if (k === 'enable') { await api.adminDisable(id, false); toast('已解除禁用'); await afterUserChange(); }
@@ -1053,6 +1064,7 @@ export async function render(el, params) {
             ${x.created_by ? `<span class="cm-tag" title="由 ${esc(x.created_by_name || '管理员')} 代录">代录</span>` : ''}
             ${x.userCount > 1 ? `<span class="cm-tag">第 ${x.userCount} 次捐赠 · 累计 ${fmtYuan(x.userTotalCents)}</span>` : ''}</div>
           <div class="cm-usub">@${esc(x.username)}${x.email ? ' · ' + esc(x.email) : ''}${x.phone ? ' · ' + esc(x.phone) : ''} · 注册于 ${fmtTime(x.registered_at)}</div>
+          <div class="cm-usub">${esc(donationDestinationLabel(d.recipients, x))}</div>
           <div class="cm-usub">单号 ${esc(x.txn_id)} · 提交于 ${fmtStamp(x.created_at)}${x.note ? ` · 备注：${esc(x.note)}` : ''}</div>
         </div>
         <span class="cm-uact" data-del="${x.id}" title="删除记录"><span class="material-icons-outlined">delete</span></span>

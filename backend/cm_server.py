@@ -2366,6 +2366,55 @@ def _library_route(handler, method, path, query, body):
     return jresp(handler, 200, result, cache_control="no-store")
 
 
+DONATION_RECIPIENTS = {
+    cm_db.DONATION_LEGACY_RECIPIENT: {
+        "name": "bileizhen",
+        "methods": {"wechat": ("微信支付", "donation-qr.jpg", "image/jpeg")},
+    },
+    "rcst20": {
+        "name": "ℝ𝕔𝕤𝕥𝟚𝟘",
+        "methods": {
+            "wechat": ("微信支付", "donation-rcst20-wechat.png", "image/png"),
+            "alipay": ("支付宝", "donation-rcst20-alipay.jpg", "image/jpeg"),
+        },
+    },
+}
+
+
+def donation_recipients():
+    return [{
+        "id": recipient_id,
+        "name": recipient["name"],
+        "methods": [
+            {"id": method, "name": name, "qrPath": f"/donation/qr/{recipient_id}/{method}"}
+            for method, (name, _, _) in recipient["methods"].items()
+        ],
+    } for recipient_id, recipient in DONATION_RECIPIENTS.items()]
+
+
+def serve_donation_qr(handler, recipient_id, payment_method):
+    recipient = DONATION_RECIPIENTS.get(recipient_id)
+    asset = recipient and recipient["methods"].get(payment_method)
+    if not asset:
+        raise ApiError(404, "捐赠二维码未配置")
+    _, filename, content_type = asset
+    fp = os.path.join(os.path.dirname(__file__), "assets", filename)
+    if not os.path.isfile(fp):
+        raise ApiError(404, "捐赠二维码未配置")
+    return serve_file(handler, fp, content_type, cache="public, max-age=86400")
+
+
+def validate_donation_destination(recipient_id, payment_method, *, allow_missing=False):
+    if allow_missing and recipient_id is None and payment_method is None:
+        return
+    if not isinstance(recipient_id, str) or recipient_id not in DONATION_RECIPIENTS:
+        raise ApiError(400, "请选择有效的收款对象")
+    if allow_missing and payment_method is None:
+        return
+    if not isinstance(payment_method, str) or payment_method not in DONATION_RECIPIENTS[recipient_id]["methods"]:
+        raise ApiError(400, "请选择该收款对象支持的支付方式")
+
+
 def route(handler, method):
     parsed = urlparse(handler.path)
     path = parsed.path.rstrip("/") or "/"
@@ -3319,9 +3368,10 @@ def route(handler, method):
             ("POST", "/admin/users/{id}/owner", "站长", "设置 / 取消站长（最高角色，仅站长，至少保留一位）"),
             ("GET", "/users/square", "公开", "用户发现广场（含公开昵称、level、ipRegion）；仅按公开昵称和个签查询。sort 默认 composite，支持 active、level"),
             ("GET", "/levels/rules", "公开", "活跃积分、等级门槛与试炼规则"),
-            ("GET", "/donation/qr", "公开", "官方捐赠二维码图片（backend/assets/donation-qr.jpg，可缓存）"),
-            ("GET", "/donation/info", "Bearer", "捐赠引导信息：账号基本信息快照、二维码地址、本人捐赠历史与累计 {mine:{items,count,totalCents}}"),
-            ("POST", "/donation", "Bearer", "提交捐赠记录 {amount 元, txnId 交易单号, note? 备注}；金额为用户自报，交易单号全站唯一（重复 409）"),
+            ("GET", "/donation/qr", "公开", "旧版客户端使用的 bileizhen 微信赞赏码（JPEG，可缓存 24 小时）"),
+            ("GET", "/donation/qr/{recipientId}/{paymentMethod}", "公开", "按收款对象与支付方式读取二维码（PNG 或 JPEG，可缓存 24 小时；未知组合返回 404）"),
+            ("GET", "/donation/info", "Bearer", "捐赠引导信息：账号快照、收款对象和支付方式 recipients、兼容二维码 qrPath、本人捐赠历史与累计 mine"),
+            ("POST", "/donation", "Bearer", "提交捐赠记录 {amount 元, txnId, note?, recipientId?, paymentMethod?}；新版成对提交收款对象和支付方式；自报金额，单号全站唯一"),
             ("POST", "/feedback", "Bearer", "提交意见反馈；Bug 可引用暂存的截图和录屏，也可用 multipart/form-data 上传私有诊断 ZIP。详见 /api-docs/reference/guide-feedback-api/"),
             ("GET", "/feedback", "Bearer", "按 requestId 查询本人反馈进度、附件数量和公开 Issue 链接"),
             ("GET", "/feedback/capabilities", "公开", "诊断 ZIP 和媒体附件的当前线路能力与大小上限"),
@@ -3330,9 +3380,9 @@ def route(handler, method):
             ("GET", "/admin/feedback/attachments/{id}", "管理员 Bearer", "列出同一反馈的媒体和诊断 ZIP"),
             ("GET", "/admin/feedback/media/{id}", "管理员 Bearer", "下载反馈的截图或录屏，七天后过期"),
             ("GET", "/admin/feedback/diagnostics/{id}", "管理员 Bearer", "下载经过脱敏的诊断 ZIP，七天后过期"),
-            ("GET", "/admin/donations", "管理员", "捐赠用户列表：搜索/分页/聚合（单笔与用户累计金额、次数）；sort=recent/recent_asc/amount/user_total/user_count/name"),
+            ("GET", "/admin/donations", "管理员", "捐赠记录列表（含收款对象与支付方式）及对象目录：搜索、分页、金额与次数聚合；sort=recent/recent_asc/amount/user_total/user_count/name"),
             ("DELETE", "/admin/donations/{id}", "管理员", "删除捐赠记录（清理误报）"),
-            ("POST", "/admin/donations", "超管/站长", "为任一用户代录捐赠 {userId 或 username, amount 元, txnId?, note?}；单号可留空自动生成 ADMIN- 前缀占位"),
+            ("POST", "/admin/donations", "超管/站长", "代录捐赠 {userId 或 username, amount 元, txnId?, note?, recipientId?, paymentMethod?}；单号留空自动生成 ADMIN- 单号"),
             ("GET", "/levels/progress", "Bearer", "当前积分、等级及今日各途径计分次数"),
             ("GET", "/levels/trial", "Bearer", "Lv.6 试炼题目（无答案）"),
             ("POST", "/levels/trial", "Bearer", "提交 50 道试炼答案 {answers}；每题 2 分，60 分及格后升至 Lv.6 Plus"),
@@ -4744,16 +4794,18 @@ def route(handler, method):
     # ---- 官方捐赠 ----
     # 二维码图片公开访问（<img> 标签无法带 Authorization 头）；文件在 backend/assets。
     if path == "/donation/qr" and method == "GET":
-        fp = os.path.join(os.path.dirname(__file__), "assets", "donation-qr.jpg")
-        if not os.path.isfile(fp):
-            raise ApiError(404, "捐赠二维码未配置")
-        return serve_file(handler, fp, "image/jpeg", cache="public, max-age=86400")
+        return serve_donation_qr(handler, cm_db.DONATION_LEGACY_RECIPIENT, "wechat")
+
+    donation_qr = re.fullmatch(r"/donation/qr/([a-z0-9]+)/([a-z0-9]+)", path)
+    if donation_qr and method == "GET":
+        return serve_donation_qr(handler, *donation_qr.groups())
 
     if path == "/donation/info" and method == "GET":
         u = require_user(handler)
         mine = cm_db.user_donations(u["id"])
         return jresp(handler, 200, {
             "qrPath": "/donation/qr",
+            "recipients": donation_recipients(),
             "profile": {   # 供「确认账号基本信息」步骤预填（以服务端为准）
                 "username": u["username"],
                 "nickname": u["nickname"],
@@ -4764,7 +4816,7 @@ def route(handler, method):
             "noteMax": cm_db.DONATION_NOTE_MAX,
             "txnMax": cm_db.DONATION_TXN_MAX,
             "mine": mine,
-        })
+        }, cache_control="private, no-store")
 
     if path == "/donation" and method == "POST":
         u = require_user(handler)
@@ -4778,13 +4830,21 @@ def route(handler, method):
         if not 6 <= len(txn) <= cm_db.DONATION_TXN_MAX or not re.fullmatch(r"[0-9A-Za-z._-]+", txn):
             raise ApiError(400, f"交易单号需为 6~{cm_db.DONATION_TXN_MAX} 位数字/字母")
         note = str(body.get("note") or "").strip()[:cm_db.DONATION_NOTE_MAX]
+        recipient_id = body.get("recipientId")
+        payment_method = body.get("paymentMethod")
+        if "recipientId" in body or "paymentMethod" in body:
+            validate_donation_destination(recipient_id, payment_method)
+        else:
+            recipient_id = cm_db.DONATION_LEGACY_RECIPIENT
         amount_cents = round(amount * 100)
         try:
-            cm_db.add_donation(u, amount_cents, txn, note)
+            cm_db.add_donation(u, amount_cents, txn, note,
+                               recipient_id=recipient_id, payment_method=payment_method)
         except sqlite3.IntegrityError:
             raise ApiError(409, "该交易单号已提交过")
         log.info("用户 %s(%s) 提交捐赠：%.2f 元，单号 %s", u["username"], u["id"], amount, txn)
-        return jresp(handler, 200, {"ok": True, "mine": cm_db.user_donations(u["id"])})
+        return jresp(handler, 200, {"ok": True, "mine": cm_db.user_donations(u["id"])},
+                     cache_control="private, no-store")
 
     # 站长/超管为任一用户代录捐赠（线下捐赠、用户无法自助提交等场景）
     if path == "/admin/donations" and method == "POST":
@@ -4810,8 +4870,12 @@ def route(handler, method):
                     or not re.fullmatch(r"[0-9A-Za-z._-]+", txn)):
             raise ApiError(400, f"交易单号需为 6~{cm_db.DONATION_TXN_MAX} 位数字/字母（留空自动生成）")
         note = str(body.get("note") or "").strip()[:cm_db.DONATION_NOTE_MAX]
+        recipient_id = body.get("recipientId")
+        payment_method = body.get("paymentMethod")
+        validate_donation_destination(recipient_id, payment_method, allow_missing=True)
         try:
-            _, txn = cm_db.admin_create_donation(me, target, round(amount * 100), txn, note)
+            _, txn = cm_db.admin_create_donation(me, target, round(amount * 100), txn, note,
+                                                recipient_id=recipient_id, payment_method=payment_method)
         except sqlite3.IntegrityError:
             raise ApiError(409, "该交易单号已存在")
         log.info("管理员 %s 为用户 %s(%s) 代录捐赠 %.2f 元（单号 %s）",
@@ -4825,8 +4889,8 @@ def route(handler, method):
             offset = max(int(q.get("offset") or 0), 0)
         except ValueError:
             raise ApiError(400, "分页参数错误")
-        return jresp(handler, 200, cm_db.admin_list_donations(
-            q.get("query") or "", limit, offset, q.get("sort") or "recent"))
+        result = cm_db.admin_list_donations(q.get("query") or "", limit, offset, q.get("sort") or "recent")
+        return jresp(handler, 200, {**result, "recipients": donation_recipients()})
 
     m = re.fullmatch(r"/admin/donations/(\d+)", path)
     if m and method == "DELETE":

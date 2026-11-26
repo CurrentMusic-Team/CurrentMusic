@@ -2,6 +2,7 @@
 // 金额由用户自报，记录仅用于站长核对与感谢，不构成任何付费服务
 import { mdui } from '../md.js';
 import { api, auth, settings } from '../api.js';
+import { bindDonationDestination, donationDestinationFields, donationDestinationLabel } from '../donation-destination.js';
 import { esc, toast } from '../ui.js';
 
 const fmtTime = ts => {
@@ -38,7 +39,8 @@ export async function render(el) {
     <div class="cm-setting-list">
       ${(mine.items || []).map(d => `
         <div class="cm-setting"><span class="material-icons-outlined">volunteer_activism</span>
-          ¥${fmtYuan(d.amount_cents)}<i>${esc(d.note || '无备注')} · ${fmtTime(d.created_at)}</i></div>`).join('')}
+          ¥${fmtYuan(d.amount_cents)}<i>${esc(donationDestinationLabel(info.recipients, d))}<br>
+            ${esc(d.note || '无备注')} · ${fmtTime(d.created_at)}</i></div>`).join('')}
     </div>`;
 
   const renderStep1 = () => {
@@ -68,9 +70,10 @@ export async function render(el) {
   const renderStep2 = note => {
     el.innerHTML = `
       <div class="cm-donate">
-        <div class="cm-sec-head"><h2>扫码捐赠</h2><span class="cm-usub">使用支付宝 / 微信扫码，金额随意</span></div>
+        <div class="cm-sec-head"><h2>扫码捐赠</h2></div>
+        ${donationDestinationFields(info.recipients)}
         <div class="cm-donate-qrbox">
-          <img src="${settings.base}${info.qrPath || '/donation/qr'}" alt="官方捐赠二维码" loading="lazy">
+          <img id="donateQr" alt="官方捐赠二维码">
           <div class="cm-donate-tip">长按或截图保存二维码，在支付应用中扫码完成捐赠。</div>
         </div>
         <div class="cm-sec-head"><h2>填写交易单号</h2><span class="cm-usub">支付完成后，把交易单号填到这里，便于核对与感谢</span></div>
@@ -86,6 +89,19 @@ export async function render(el) {
           </div>
         </div>
       </div>`;
+    let qr = el.querySelector('#donateQr');
+    const readDestination = bindDonationDestination(el, info.recipients, {
+      onChange: (recipient, method) => {
+        // 图片加载期间立即移除上一个收款码。
+        const image = document.createElement('img');
+        image.id = qr.id;
+        image.alt = `${recipient.name}的${method.name}收款码`;
+        image.src = settings.base + method.qrPath;
+        qr.replaceWith(image);
+        qr = image;
+      },
+    });
+    if (!info.recipients?.length) qr.src = settings.base + (info.qrPath || '/donation/qr');
     document.getElementById('out').scrollTop = 0;
     el.querySelector('#donateBack').onclick = renderStep1;
     const submit = el.querySelector('#donateSubmit');
@@ -97,7 +113,8 @@ export async function render(el) {
       if (!/^[0-9A-Za-z._-]{6,}$/.test(txn)) { toast('交易单号需为 6 位以上数字/字母'); return; }
       submit.loading = true;
       try {
-        const r = await api.donationSubmit(Math.round(amount * 100) / 100, txn, note);
+        const r = await api.donationSubmit(Math.round(amount * 100) / 100, txn, note, readDestination());
+        info.mine = r.mine;
         toast('捐赠记录已提交，感谢你的支持！');
         renderDone(r.mine);
       } catch (e) { toast(e.message); } finally { submit.loading = false; }

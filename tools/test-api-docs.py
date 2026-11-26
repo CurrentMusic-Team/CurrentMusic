@@ -33,6 +33,13 @@ class DocumentationTests(unittest.TestCase):
             self.assertIn((method,path),found)
         for method, path in [('GET', '/search/history'), ('POST', '/search/history'), ('DELETE', '/search/history'), ('POST', '/search/history/import')]:
             self.assertIn((method, path), found)
+        for method, path in [('GET', '/donation/qr'), ('GET', '/donation/qr/{recipientId}/{paymentMethod}'),
+                             ('GET', '/donation/info'), ('POST', '/donation'), ('POST', '/admin/donations')]:
+            self.assertIn((method, path), found)
+        for path in ('/donation', '/admin/donations'):
+            fields = docs.params(found['POST', path])
+            self.assertIn(('JSON body', 'recipientId'), fields)
+            self.assertIn(('JSON body', 'paymentMethod'), fields)
         for method, path in [('DELETE', '/rooms/{id}'), ('POST', '/rooms/{id}/close'),
                              ('POST', '/rooms/{id}/reopen'), ('GET', '/rooms/{id}/bans'),
                              ('DELETE', '/rooms/{id}/bans/{id2}'), ('POST', '/rooms/{id}/queue/reorder'),
@@ -80,6 +87,8 @@ class DocumentationTests(unittest.TestCase):
             })
             self.assertTrue((output/'guide-community-api.md').is_file())
             self.assertIn('(guide-community-api.md)', (output/'_sidebar.md').read_text())
+            self.assertIn('(guide-donations-api.md)', (output/'_sidebar.md').read_text())
+            self.assertIn('/cm/donation/qr/{recipientId}/{paymentMethod}', (output/'endpoints.md').read_text())
             services = json.loads((output/'music-service-capabilities.json').read_text())['operations']
             schema = json.loads((output/'music-service.openapi.json').read_text())['paths']
             published = {item['path'] for item in manifest if item['group'] == '外接音乐服务'}
