@@ -89,6 +89,10 @@ be imported without installing the Qt GUI stack.
 
 ## Backend dependencies and content
 
+- The recipient supplied the WeChat Pay and Alipay collection images under
+  `backend/assets/donation-rcst20-*` for the donation page. The payment provider
+  artwork and marks remain subject to their respective rights.
+
 - opencc-python-reimplemented 0.1.7 (Apache-2.0), https://github.com/yichen0831/opencc-python,
   uses OpenCC dictionaries (https://github.com/BYVoid/OpenCC) to normalize traditional/simplified
   Chinese matching keys. Displayed lyric text is preserved. Pinned in `deploy/requirements-search.txt`;

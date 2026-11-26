@@ -397,6 +397,8 @@ CREATE TABLE IF NOT EXISTS donations (   /* 官方捐赠：用户扫码捐赠后
   amount_cents INTEGER NOT NULL,     /* 自报捐赠金额（分） */
   note TEXT DEFAULT '',              /* 可选备注 */
   txn_id TEXT NOT NULL,              /* 支付交易单号（全站唯一，防重复提交）；管理员代录可自动生成 ADMIN- 前缀占位 */
+  recipient_id TEXT,
+  payment_method TEXT,
   created_by INTEGER DEFAULT 0,      /* >0 = 管理员代录（操作管理员 uid）；0 = 用户自助提交 */
   created_at INTEGER NOT NULL,
   UNIQUE(txn_id)
@@ -410,9 +412,10 @@ CREATE INDEX IF NOT EXISTS idx_donation_created ON donations(created_at DESC);
 
 DONATION_NOTE_MAX = 120      # 备注长度上限
 DONATION_TXN_MAX = 64        # 交易单号长度上限
+DONATION_LEGACY_RECIPIENT = "bileizhen"
 
 
-def add_donation(user, amount_cents, txn_id, note="", created_by=0):
+def add_donation(user, amount_cents, txn_id, note="", created_by=0, *, recipient_id=None, payment_method=None):
     """记录一笔捐赠；交易单号重复抛 sqlite3.IntegrityError。
 
     created_by>0 表示管理员代录（快照仍取目标用户的账号信息）。
@@ -421,10 +424,12 @@ def add_donation(user, amount_cents, txn_id, note="", created_by=0):
     try:
         cur = conn.execute(
             """INSERT INTO donations
-                 (user_id, username, email, phone, registered_at, amount_cents, note, txn_id, created_by, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                 (user_id, username, email, phone, registered_at, amount_cents, note,
+                  txn_id, created_by, created_at, recipient_id, payment_method)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (user["id"], user["username"], user.get("email") or "", user.get("phone") or "",
-             user.get("created_at") or 0, amount_cents, note, txn_id, created_by, int(time.time())),
+             user.get("created_at") or 0, amount_cents, note, txn_id, created_by, int(time.time()),
+             recipient_id, payment_method),
         )
         conn.commit()
         return cur.lastrowid
@@ -432,14 +437,16 @@ def add_donation(user, amount_cents, txn_id, note="", created_by=0):
         conn.close()
 
 
-def admin_create_donation(admin, target, amount_cents, txn_id="", note=""):
+def admin_create_donation(admin, target, amount_cents, txn_id="", note="", *, recipient_id=None, payment_method=None):
     """站长/超管为任一用户代录捐赠；未提供单号时生成 ADMIN- 前缀占位单号。
 
     返回 (记录 id, 实际单号)；真实单号重复抛 sqlite3.IntegrityError。
     """
     if not txn_id:
         txn_id = f"ADMIN-{int(time.time())}-{secrets.token_hex(3).upper()}"
-    return add_donation(target, amount_cents, txn_id, note, created_by=admin["id"]), txn_id
+    donation_id = add_donation(target, amount_cents, txn_id, note, created_by=admin["id"],
+                               recipient_id=recipient_id, payment_method=payment_method)
+    return donation_id, txn_id
 
 
 def user_donations(user_id):
@@ -447,7 +454,7 @@ def user_donations(user_id):
     conn = connect()
     try:
         rows = conn.execute(
-            "SELECT id, amount_cents, note, txn_id, created_at FROM donations"
+            "SELECT id, amount_cents, note, txn_id, created_at, recipient_id, payment_method FROM donations"
             " WHERE user_id=? ORDER BY created_at DESC LIMIT 100",
             (user_id,),
         ).fetchall()
@@ -744,8 +751,17 @@ def init():
     conn.execute("DROP TABLE IF EXISTS artist_follows")
     # donations 表后加的列（老库补列；新库由 SCHEMA 直接建全）
     dncols = {r[1] for r in conn.execute("PRAGMA table_info(donations)")}
-    if dncols and "created_by" not in dncols:
+    if "created_by" not in dncols:
         conn.execute("ALTER TABLE donations ADD COLUMN created_by INTEGER DEFAULT 0")
+    if "recipient_id" not in dncols or "payment_method" not in dncols:
+        conn.execute("SAVEPOINT donation_metadata_migration")
+        if "recipient_id" not in dncols:
+            conn.execute("ALTER TABLE donations ADD COLUMN recipient_id TEXT")
+            conn.execute("UPDATE donations SET recipient_id=? WHERE COALESCE(created_by, 0)=0",
+                         (DONATION_LEGACY_RECIPIENT,))
+        if "payment_method" not in dncols:
+            conn.execute("ALTER TABLE donations ADD COLUMN payment_method TEXT")
+        conn.execute("RELEASE donation_metadata_migration")
     post_columns = {r[1] for r in conn.execute("PRAGMA table_info(posts)")}
     if "title" not in post_columns:
         conn.execute("ALTER TABLE posts ADD COLUMN title TEXT NOT NULL DEFAULT ''")

@@ -114,6 +114,7 @@ def path_templates(pattern):
             if pattern.startswith('/passport/apps/'): name='client_id'
             if pattern.startswith('/passport/grants/'): name='grant_id'
             if pattern.startswith('/music-service/v1/'): name='operation'
+            if pattern.startswith('/donation/qr/'): name='recipientId' if ident==1 else 'paymentMethod'
             if pattern.startswith('/feedback/') and '/media/' in pattern: name='requestId' if ident==1 else 'slot'
             choices = ['{' + name + '}']
         pieces.append(([''] if optional else []) + choices)
@@ -237,6 +238,8 @@ def endpoint_text(method, path, node, title, access=None):
     text = [f'## {method} /cm{path}', '', title, '', f'**权限**：{permission}。', '']
     if path.startswith('/rooms'):
         text += ['请求与响应细节见[一起听房间 API 与同步协议](guide-rooms-design.md)。', '']
+    if path.startswith(('/donation', '/admin/donations')):
+        text += ['收款对象、支付方式和客户端兼容规则见[官方捐赠与第三方接入](guide-donations-api.md)。', '']
     if path.startswith(('/posts', '/profile/banner')) or path in ('/users/{id}/profile', '/users/{id}/banner', '/auth/me', '/profile'):
         text += ['请求与响应细节见[个人主页、横幅与帖子](guide-community-api.md)。', '']
     if path.startswith('/admin/ai'):

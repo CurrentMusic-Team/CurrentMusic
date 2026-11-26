@@ -323,7 +323,9 @@ export const api = {
   },
   // 官方捐赠：信息/提交（金额为用户自报，交易单号全站唯一）
   donationInfo: () => call('GET', '/donation/info', { auth: true }),
-  donationSubmit: (amount, txnId, note) => call('POST', '/donation', { body: { amount, txnId, note }, auth: true }),
+  donationSubmit: (amount, txnId, note, destination) => call('POST', '/donation', {
+    body: { amount, txnId, note, ...destination }, auth: true,
+  }),
   /** 客户端版本：CurrentMusic（本站 APK）与 CurrentMusicX（GitHub Releases 镜像）。 */
   adminClients: () => call('GET', '/admin/clients', { auth: true }),
   /** 站点出站流量统计（nginx 日志聚合，需部署方配置 CM_TRAFFIC_LOG）。 */
