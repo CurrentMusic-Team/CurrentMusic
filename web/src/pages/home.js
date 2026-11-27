@@ -1,62 +1,11 @@
 // 首页：每日推荐 + 排行榜 + 猜你喜欢（登录后） + 最近播放（登录后）
 import { kugouWrite } from '../kugou-library.js';
 import { api, auth, ncmSongs, settings } from '../api.js';
-import { esc, renderSongList, skelCards, skelList, toast } from '../ui.js';
+import { esc, renderSongList, toast } from '../ui.js';
 import { player } from '../player.js';
 import { bindPlatformSelector, kugouDetailLink, kugouHome, musicPlatform, platformSelector } from '../music-platform.js';
 import { levelBadge } from '../level-badges.js';
-
-// 首页顶部问候区（v1.28.37）：完整日期 + 星期 + 秒级时钟 + 按时段问候。
-// 时钟每秒只改两个 textContent；页面被路由替换后（isConnected=false）自动停表。
-const WEEKDAY = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
-const pad2 = n => String(n).padStart(2, '0');
-
-/** 按时段给问候语（凌晨/早上/上午/中午/下午/晚上）。 */
-function periodOf(h) {
-  if (h >= 5 && h < 9) return '早上好';
-  if (h >= 9 && h < 12) return '上午好';
-  if (h >= 12 && h < 14) return '中午好';
-  if (h >= 14 && h < 18) return '下午好';
-  if (h >= 18 && h < 23) return '晚上好';
-  return '夜深了';
-}
-
-function greetWho() {
-  return auth.user ? auth.user.nickname : '今天想听点什么？';
-}
-
-function greetMarkup(platform) {
-  const d = new Date();
-  const date = `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
-  const clock = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
-  return `
-    <div class="cm-greet">
-      <div class="cm-greet-date">
-        <span>${date}</span>
-        <span class="cm-greet-week">${WEEKDAY[d.getDay()]}</span>
-        <span class="cm-greet-sep" aria-hidden="true">·</span>
-        <time class="cm-greet-clock" id="greetClock">${clock}</time>
-      </div>
-      <div class="cm-greet-title" id="greetTitle">${esc(periodOf(d.getHours()))}，${esc(greetWho())}</div>
-      ${platformSelector(platform)}
-    </div>`;
-}
-
-/** 启动时钟：每秒更新时刻；跨时段时同步更新问候语（只在变化时写 DOM）。 */
-function startGreetClock(root) {
-  const clock = root.querySelector('#greetClock');
-  const title = root.querySelector('#greetTitle');
-  if (!clock || !title) return;
-  const tick = () => {
-    if (!clock.isConnected) { clearInterval(timer); return; }   // 已离开首页
-    const d = new Date();
-    clock.textContent = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
-    const next = `${periodOf(d.getHours())}，${greetWho()}`;
-    if (title.textContent !== next) title.textContent = next;
-  };
-  const timer = setInterval(tick, 1000);
-  tick();
-}
+import { bindDailyShelf, homeDaily, homeIntro, homeShortcuts } from './home-sections.js';
 
 // CurrentMusicX 推广横幅：第三方 Android 客户端，由本站超级管理员 bileizhen 开发维护。
 // 下载走服务端镜像（/cm/x/download/latest，始终指向最新版），不依赖 GitHub 直连。
@@ -108,12 +57,12 @@ async function accountBannersHTML() {
 // 首页大横幅：移植「翱翔鸟Music / Apple Music」首页的双列 hero
 // （封面大图 + 从左侧压暗的遮罩 + 大标题，点击进歌单或直接播放）。
 const HERO_TINT = [['#5B4BFF', '#FF3D71'], ['#00C2FF', '#FF6B4A']];
-function heroHTML(daily, recPls) {
+function heroHTML(daily, recPls, chartHref) {
   const items = [];
   (recPls || []).slice(0, 2).forEach((p, i) => {
     if (!p || !p.picUrl) return;
     items.push({
-      kind: 'pl', href: p.href || `#/ncmpl/${p.id}`, pic: `${p.picUrl}?param=800y800`, tint: HERO_TINT[i % 2],
+      kind: 'pl', href: chartHref(p.id), pic: p.picUrl, tint: HERO_TINT[i % 2],
       eyebrow: '精选歌单', title: p.name, sub: p.trackCount ? `${p.trackCount} 首` : '',
     });
   });
@@ -126,23 +75,6 @@ function heroHTML(daily, recPls) {
   });
   if (!items.length) return '';
   return renderHeroItems(items);
-}
-
-/** 兜底：直接从「每日推荐」横滑卡片提取封面/标题，保证 hero 一定出得来。 */
-function heroFromCards(el) {
-  const cards = [...el.querySelectorAll('#dailyRow .cm-card')].slice(0, 2);
-  const items = cards.map((c, i) => {
-    const img = c.querySelector('img');
-    const src = img && img.getAttribute('src');
-    if (!src) return null;
-    return {
-      kind: 'song', songIdx: +c.dataset.i, pic: src, tint: HERO_TINT[i % 2],
-      eyebrow: '每日推荐',
-      title: (c.querySelector('.cm-card-name') || {}).textContent || '',
-      sub: (c.querySelector('.cm-card-sub') || {}).textContent || '',
-    };
-  }).filter(Boolean);
-  return items.length ? renderHeroItems(items) : '';
 }
 
 function renderHeroItems(items) {
@@ -163,13 +95,10 @@ function renderHeroItems(items) {
 export async function render(el) {
   const platform = musicPlatform();
   const kugou = platform === 'kugou';
+  const compact = localStorage.getItem('cm-home-style') === 'cmx-simple';
+  const intro = homeIntro(platformSelector(platform));
   const bindSelector = () => bindPlatformSelector(el, () => render(el));
-  el.innerHTML = `
-    ${cmxBannerHTML()}
-    ${greetMarkup(platform)}
-    <section class="cm-sec"><div class="cm-sec-head"><h2>每日推荐</h2></div>${skelCards(8)}</section>
-    <section class="cm-sec">${skelList(3)}</section>`;
-  startGreetClock(el);
+  el.innerHTML = `<div class="cm-home-layout">${intro}${homeDaily([], { loading: true, compact })}</div>`;
   bindSelector();
   const initialSelector = el.querySelector('.cm-platform-select');
   let charts = [
@@ -190,7 +119,7 @@ export async function render(el) {
     recent = data.recent;
     const mainRanks = ['TOP500', '飙升榜', '新歌榜'];
     charts = mainRanks.map(name => data.charts.find(item => item.name === name)).filter(Boolean);
-    recPls = data.playlists.map(item => ({ ...item, picUrl: item.artwork, href: chartHref(item.id) }));
+    recPls = data.playlists.map(item => ({ ...item, picUrl: item.artwork }));
     bannerHTML = banner;
   } else {
     const boot = await api.bootstrap().catch(() => null);
@@ -223,182 +152,136 @@ export async function render(el) {
     }
   }
 
-  if (el.querySelector('.cm-platform-select') !== initialSelector) return;
+  if (!el.isConnected || el.querySelector('.cm-platform-select') !== initialSelector) return;
   const keepFocus = document.activeElement === initialSelector;
+  const chartsUrl = kugou ? '#/kugou/charts' : '#/square';
+  const hero = !compact && document.documentElement.dataset.uiPreset === 'soaringbird' ? heroHTML(daily, recPls, chartHref) : '';
+  const login = !auth.token ? `<section class="cm-sec">
+    <div class="cm-login-tip"><div>登录后同步点赞、收藏与歌单</div>
+      <mdui-button variant="filled" href="#/user">去登录</mdui-button></div>
+  </section>` : '';
 
-  el.innerHTML = `
-    ${cmxBannerHTML()}
-    ${greetMarkup(platform)}
-    ${bannerHTML}
-    <section class="cm-sec">
-      <div class="cm-sec-head"><h2>一键开听</h2><span class="cm-sec-sub">按听歌动线排</span></div>
-      <div class="cm-quickrow">
-        <a class="cm-quick" href="#/podcast"><span class="material-icons-outlined">radio</span><b>私人 FM</b><i>无限电台</i></a>
-        <span class="cm-quick" id="quickHeart"><span class="material-icons-outlined">auto_awesome</span><b>心动模式</b><i>按口味续播</i></span>
-        <span class="cm-quick" id="quickDaily"><span class="material-icons-outlined">play_circle</span><b>每日推荐</b><i>${daily.length ? `${daily.length} 首` : '今日待出'}</i></span>
-        <a class="cm-quick" href="#/library"><span class="material-icons-outlined">queue_music</span><b>我的歌单</b><i>收藏与自建</i></a>
-      </div>
-    </section>
-    <section class="cm-sec">
-      <div class="cm-sec-head"><h2>每日推荐</h2><span class="cm-sec-more" id="playDaily"><span class="material-icons-outlined">play_circle</span> 播放全部</span></div>
-      ${daily.length ? `<div class="cm-hscroll" id="dailyRow">${
-        daily.slice(0, 12).map((s, i) => `
-          <div class="cm-card" data-i="${i}">
-            <img src="${esc(s.pic)}" loading="lazy" onerror="this.classList.add('none')">
-            <div class="cm-card-name">${esc(s.name)}</div>
-            <div class="cm-card-sub">${esc(s.artists)}</div>
-          </div>`).join('')
-      }</div>` : `<div class="cm-empty small">今日推荐暂不可用</div>`}
-    </section>
-    ${recent.length ? `
-    <section class="cm-sec">
-      <div class="cm-sec-head"><h2>继续播放</h2><span class="cm-sec-more" id="playRecent"><span class="material-icons-outlined">play_circle</span> 播放全部</span></div>
-      <div id="recentList"></div>
-      <div class="cm-more-row" id="recentMore" hidden></div>
-    </section>` : ''}
-    ${forYou.length ? `
-    <section class="cm-sec">
-      <div class="cm-sec-head"><h2>猜你喜欢</h2><span class="cm-sec-sub">基于你点赞的歌手：${esc(artists.join('、'))}</span></div>
-      <div id="forYouList"></div>
-      <div class="cm-more-row" id="forYouMore" hidden></div>
-    </section>` : ''}
-    ${recPls.length ? `
-    <section class="cm-sec">
-      <div class="cm-sec-head"><h2>每日推荐歌单</h2><span class="cm-sec-sub">${kugou ? '酷狗概念版精选' : '来自你的网易云账号'}</span></div>
+  const sections = compact ? '' : `
+    ${homeShortcuts(chartsUrl)}
+    ${hero}
+    <div class="cm-home-columns${recent.length && forYou.length ? ' has-pair' : ''}">
+      ${forYou.length ? `<section class="cm-sec">
+        <div class="cm-sec-head"><h2>猜你喜欢</h2>${artists.length ? `<span class="cm-sec-sub">${esc(artists.join('、'))}</span>` : ''}</div>
+        <div id="forYouList"></div>
+        <button type="button" class="cm-more-row" id="forYouMore" hidden></button>
+      </section>` : ''}
+      ${recent.length ? `<section class="cm-sec">
+        <div class="cm-sec-head"><h2>最近播放</h2>
+          <button type="button" class="cm-sec-more" id="playRecent"><span class="material-icons-outlined" aria-hidden="true">play_circle</span>播放全部</button>
+        </div>
+        <div id="recentList"></div>
+        <button type="button" class="cm-more-row" id="recentMore" hidden></button>
+      </section>` : ''}
+    </div>
+    ${recPls.length ? `<section class="cm-sec">
+      <div class="cm-sec-head"><h2>每日推荐歌单</h2></div>
       <div class="cm-plgrid" id="recPlsGrid">${recPls.slice(0, 6).map(pl => `
-        <div class="cm-plcard" data-id="${esc(pl.id)}">
-          <div class="cm-plcover">${pl.picUrl ? `<img src="${esc(pl.picUrl)}?param=300y300" loading="lazy" onerror="this.remove()">` : ''}<span class="material-icons-outlined">queue_music</span></div>
+        <a class="cm-plcard" href="${esc(chartHref(pl.id))}">
+          <div class="cm-plcover">${pl.picUrl ? `<img src="${esc(pl.picUrl)}" loading="lazy" alt="" onerror="this.remove()">` : ''}<span class="material-icons-outlined" aria-hidden="true">queue_music</span></div>
           <div class="cm-plname">${esc(pl.name)}</div>
-          <div class="cm-plsub">${pl.trackCount || 0} 首</div>
-        </div>`).join('')}</div>
+          ${pl.trackCount ? `<div class="cm-plsub">${esc(pl.trackCount)} 首</div>` : ''}
+        </a>`).join('')}</div>
     </section>` : ''}
-    <section class="cm-sec">
-      <div class="cm-sec-head"><h2>排行榜</h2><span class="cm-sec-more" id="goNcmPls"><span class="material-icons-outlined">trending_up</span> 更多榜单</span></div>
+    ${charts.length ? `<section class="cm-sec">
+      <div class="cm-sec-head"><h2>排行榜</h2><a class="cm-sec-more" href="${chartsUrl}">更多榜单</a></div>
       <div class="cm-quickrow">
-        ${charts.map((chart, i) => `<a class="cm-quick" href="${esc(chartHref(chart.id))}"><span class="material-icons-outlined">${['local_fire_department', 'trending_up', 'star'][i]}</span><b>${esc(chart.name)}</b></a>`).join('')}
+        ${charts.map((chart, i) => `<a class="cm-quick" href="${esc(chartHref(chart.id))}">
+          <span class="material-icons-outlined" aria-hidden="true">${['local_fire_department', 'trending_up', 'star'][i]}</span><b>${esc(chart.name)}</b></a>`).join('')}
       </div>
-    </section>
-    ${forYou.length ? `
-    <section class="cm-sec">
-      <div class="cm-sec-head"><h2>一起听</h2><span class="cm-sec-more" id="goRooms"><span class="material-icons-outlined">groups</span> 房间广场</span></div>
+    </section>` : ''}
+    ${forYou.length ? `<section class="cm-sec">
+      <div class="cm-sec-head"><h2>一起听</h2><a class="cm-sec-more" href="#/rooms">房间广场</a></div>
       <div class="cm-quickrow">
-        <a class="cm-quick" href="#/rooms"><span class="material-icons-outlined">meeting_room</span><b>加入房间</b><i>多人同步播放</i></a>
-        <a class="cm-quick" id="quickCreateRoom"><span class="material-icons-outlined">add_circle</span><b>创建房间</b><i>可设密码</i></a>
+        <a class="cm-quick" href="#/rooms"><span class="material-icons-outlined" aria-hidden="true">meeting_room</span><b>加入房间</b></a>
+        <button type="button" class="cm-quick" id="quickCreateRoom"><span class="material-icons-outlined" aria-hidden="true">add_circle</span><b>创建房间</b></button>
       </div>
     </section>` : ''}
-    ${!auth.token ? `
-    <section class="cm-sec">
-      <div class="cm-login-tip">
-        <div>登录 CurrentMusic 账号，同步点赞、收藏与歌单</div>
-        <mdui-button variant="filled" href="#/user">去登录</mdui-button>
-      </div>
-    </section>` : ''}
-  `;
-  startGreetClock(el);            // 正式内容渲染后重启时钟（骨架屏那份随节点替换自动停）
+    <div class="cm-home-footer">${bannerHTML}${cmxBannerHTML()}</div>`;
+  el.innerHTML = `<div class="cm-home-layout">${intro}${homeDaily(daily, { compact })}${sections}${login}</div>`;
   bindSelector();
   if (keepFocus) el.querySelector('.cm-platform-select')?.focus({ preventScroll: true });
+  const playDaily = index => player.playList(daily, index);
+  bindDailyShelf(el, playDaily, () => render(el));
+  if (compact) return;
 
-  // 首页 hero 单独插入（放在问候语之后、第一个区块之前）：不参与整页模板字符串，
-  // 数据为空时也不会占位。
-  const heroSection = document.documentElement.dataset.uiPreset === 'soaringbird'
-    ? heroHTML(daily, recPls) || heroFromCards(el)
-    : '';
-  const firstSec = el.querySelector('.cm-sec');
-  if (heroSection && firstSec) firstSec.insertAdjacentHTML('beforebegin', heroSection);
-  // 首页 hero 里「每日推荐歌曲」那张大卡：点一下就从该曲开始播
-  el.querySelectorAll('.cm-hero__card[data-hero-song]').forEach(b => {
-    b.addEventListener('click', () => {
-      const i = +b.dataset.heroSong;
-      if (daily[i]) player.playList(daily, i);
-    });
+  el.querySelectorAll('.cm-hero__card[data-hero-song]').forEach(button => {
+    button.onclick = () => playDaily(Number(button.dataset.heroSong));
   });
-  // 骨架屏那次渲染会被正式内容整体替换，所以必须在这里（最终 DOM）绑定；
-  // App 的 WebView 不会把 APK 链接当下载，直接走原生下载桥；浏览器保留普通 <a>。
   const cmxBanner = el.querySelector('.cm-cmx-banner');
-  if (cmxBanner && window.NativeApi && typeof window.NativeApi.downloadApk === 'function') {
-    cmxBanner.addEventListener('click', e => {
-      e.preventDefault();
+  if (cmxBanner && typeof window.NativeApi?.downloadApk === 'function') {
+    cmxBanner.addEventListener('click', event => {
+      event.preventDefault();
       try {
         window.NativeApi.downloadApk(cmxBanner.href, 'CurrentMusicX.apk');
         toast('开始下载 CurrentMusicX…');
-      } catch (err) {
+      } catch {
         location.href = cmxBanner.href;
       }
     });
   }
-
-  const dailyRow = el.querySelector('#dailyRow');
-  if (dailyRow) dailyRow.querySelectorAll('.cm-card').forEach(c => {
-    c.onclick = () => player.playList(daily, +c.dataset.i);
-  });
-  el.querySelector('#playDaily')?.addEventListener('click', () => player.playList(daily, 0));
-  // 一键开听：心动模式以「最近播放第一首」优先做种子（更贴近"接着刚才的口味听"），
-  // 其次用每日推荐首曲；都没有时明确说明原因，不给假按钮。
-  el.querySelector('#quickDaily')?.addEventListener('click', () => {
-    if (!daily.length) return toast('今日推荐还没出来，稍后再试');
-    player.playList(daily, 0);
-  });
   el.querySelector('#quickHeart')?.addEventListener('click', () => {
     const seed = recent[0] || daily[0];
     if (!seed) return toast('需要先有播放记录或每日推荐才能起播心动模式');
     player.startHeart(seed);
   });
-  // 「更多榜单」→ 发现页（那里有完整榜单与分组切换），别做点不动的假入口
-  el.querySelector('#goNcmPls')?.addEventListener('click', () => { location.hash = kugou ? '#/kugou/charts' : '#/square'; });
-  el.querySelectorAll('#recPlsGrid .cm-plcard').forEach(c => {
-    c.onclick = () => { location.hash = chartHref(c.dataset.id); };
-  });
-  // 「不感兴趣」：T2 写操作，需用户绑定 + confirm=1；成功后本地移除该曲
-  el.querySelectorAll('#dailyRow .cm-card').forEach(c => {
-    const i = +c.dataset.i;
-    const s2 = daily[i];
-    if (!s2) return;
-    const btn = document.createElement('span');
-    btn.className = 'material-icons-outlined';
-    btn.textContent = 'block';
-    btn.title = '不感兴趣';
-    btn.style.cssText = 'position:absolute;top:4px;right:4px;font-size:calc(16px * var(--cm-fs, 1));opacity:.55';
-    btn.addEventListener('click', async ev => {
-      ev.stopPropagation();
-      if (kugou && !auth.token) return toast('登录后才能标记不感兴趣');
-      if (!kugou && !ncmBound) return toast('需先绑定网易云账号');
-      try {
-        if (kugou) await kugouWrite('roaming.skip', { id: s2.kugou_id });
-        else await api.ncm('/recommend/songs/dislike', { id: s2.ncm_id, confirm: 1 });
-        toast('已标记不感兴趣');
-        c.remove();
-      } catch (e) { toast('操作失败：' + e.message); }
-    });
-    c.style.position = 'relative';
-    c.appendChild(btn);
-  });
   el.querySelector('#quickCreateRoom')?.addEventListener('click', () => {
-    import('./rooms.js').then(m => m.createRoomDialog());   // 首页直达创建
+    import('./rooms.js').then(module => module.createRoomDialog());
   });
   el.querySelector('#playRecent')?.addEventListener('click', () => player.playList(recent, 0));
 
-  // 分段折叠：首屏每个列表只放前 5 条，避免整页被长列表淹没（越长越乱）。
-  // 展开即换一份切片重渲染——索引始终是原数组前缀，播放回调无需改。
-  const PREVIEW = 5;
-  async function bindCollapsible(boxId, moreId, list) {
+  if (kugou ? auth.token : ncmBound) {
+    el.querySelectorAll('#dailyRow .cm-card').forEach(card => {
+      const song = daily[Number(card.dataset.i)];
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'cm-home-track-dismiss material-icons-outlined';
+      button.textContent = 'block';
+      button.setAttribute('aria-label', `对《${song.name}》标记不感兴趣`);
+      button.title = '不感兴趣';
+      button.onclick = async () => {
+        button.disabled = true;
+        try {
+          if (kugou) await kugouWrite('roaming.skip', { id: song.kugou_id });
+          else await api.ncm('/recommend/songs/dislike', { id: song.ncm_id, confirm: 1 });
+          toast('已标记不感兴趣');
+          card.remove();
+        } catch (error) {
+          toast('操作失败：' + error.message);
+          button.disabled = false;
+        }
+      };
+      card.appendChild(button);
+    });
+  }
+
+  const previewCount = 5;
+  async function bindCollapsible(boxId, moreId, songs) {
     const box = el.querySelector('#' + boxId);
     const more = el.querySelector('#' + moreId);
-    if (!box || !list.length) return;
+    if (!box) return;
     let expanded = false;
-    const draw = async () => {
-      await renderSongList(box, expanded ? list : list.slice(0, PREVIEW), {
-        onPlay: i => player.playList(list, i),
+    const rest = songs.length - previewCount;
+    async function draw() {
+      await renderSongList(box, expanded ? songs : songs.slice(0, previewCount), {
+        onPlay: index => player.playList(songs, index),
       });
-      if (!more) return;
-      const rest = list.length - PREVIEW;
-      more.hidden = rest <= 0;                       // 本来就放得下就不显示按钮
+      more.hidden = rest <= 0;
+      more.setAttribute('aria-expanded', String(expanded));
       more.innerHTML = expanded
-        ? `<span class="material-icons-outlined cm-rot180">keyboard_arrow_down</span> 收起`
-        : `查看全部（还有 ${rest} 首）<span class="material-icons-outlined">keyboard_arrow_down</span>`;
-    };
-    if (more) more.onclick = async () => { expanded = !expanded; await draw(); };
+        ? '<span class="material-icons-outlined cm-rot180" aria-hidden="true">keyboard_arrow_down</span> 收起'
+        : `查看全部（还有 ${rest} 首）<span class="material-icons-outlined" aria-hidden="true">keyboard_arrow_down</span>`;
+    }
+    more.setAttribute('aria-controls', boxId);
+    more.onclick = async () => { expanded = !expanded; await draw(); };
     await draw();
   }
-  if (forYou.length) await bindCollapsible('forYouList', 'forYouMore', forYou);
-  if (recent.length) await bindCollapsible('recentList', 'recentMore', recent);
+  await Promise.all([
+    bindCollapsible('forYouList', 'forYouMore', forYou),
+    bindCollapsible('recentList', 'recentMore', recent),
+  ]);
 }
