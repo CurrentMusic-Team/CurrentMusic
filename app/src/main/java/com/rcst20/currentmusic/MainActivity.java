@@ -447,8 +447,17 @@ public class MainActivity extends Activity {
             fileCallback = cb;
             Intent i = new Intent(Intent.ACTION_GET_CONTENT);
             i.addCategory(Intent.CATEGORY_OPENABLE);
-            i.setType("image/*");
-            startActivityForResult(Intent.createChooser(i, "选择图片"), REQ_FILE);
+            boolean acceptsVideo = false;
+            for (String type : params.getAcceptTypes()) {
+                if (type.contains("video/")) acceptsVideo = true;
+            }
+            if (acceptsVideo) {
+                i.setType("*/*");
+                i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*"});
+            } else {
+                i.setType("image/*");
+            }
+            startActivityForResult(Intent.createChooser(i, acceptsVideo ? "选择图片或视频" : "选择图片"), REQ_FILE);
             return true;
         }
     }

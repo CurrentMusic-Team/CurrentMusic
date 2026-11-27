@@ -31,7 +31,7 @@ export async function render(el, params) {
 
   el.innerHTML = `
     <div class="cm-community-profile">
-      ${profileBannerHTML(u.bannerUrl)}
+      ${profileBannerHTML(u)}
       <div class="cm-up-head">
         <div class="cm-up-ava">${avatarHTML(u, 76)}</div>
         <div class="cm-up-info">

@@ -1,12 +1,16 @@
 """Community profile and post API tests using the temporary route test harness."""
 import base64
 import io
+import json
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cm_db
+import cm_profile_banner
 import cm_server
 import test_password_reset as harness
 
@@ -121,7 +125,7 @@ class TestCommunity(unittest.TestCase):
         self.assertEqual(handler.status, 200)
         self.assertEqual(headers["Content-Type"], "image/jpeg")
         with Image.open(io.BytesIO(handler.wfile.getvalue())) as image:
-            self.assertEqual(image.size, (900, 225))
+            self.assertEqual(image.size, (600, 400))
             self.assertFalse(image.getexif())
         cached = harness._Handler("GET", path)
         cached.headers["If-None-Match"] = headers["ETag"]
@@ -140,3 +144,86 @@ class TestCommunity(unittest.TestCase):
             self.assertEqual(self.call("DELETE", banner, token=token), (200, {"bannerUrl": ""}))
         self.assertEqual(self.call("GET", result["bannerUrl"])[0], 404)
         self.assertEqual(self.call("GET", public)[1]["user"]["bannerUrl"], "")
+
+    def test_legacy_image_banner_survives_migration(self):
+        uid, _ = self.user("legacy-banner-owner")
+        version, image = "a" * 24, b"legacy JPEG bytes"
+        with cm_db.connect() as db:
+            db.execute("ALTER TABLE profile_banners DROP COLUMN content_type")
+            db.execute("INSERT INTO profile_banners VALUES (?, ?, ?)", (uid, version, image))
+        cm_db.init()
+        cm_db.init()
+        fields = self.call("GET", f"/users/{uid}/profile")[1]["user"]
+        self.assertNotIn("bannerType", fields)
+        handler = self.banner_request("GET", fields["bannerUrl"])
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(handler.response_headers["Content-Type"], "image/jpeg")
+        self.assertEqual(handler.wfile.getvalue(), image)
+
+    def banner_request(self, method, path, *, token="", data=None, headers=None):
+        handler = harness._Handler(method, path, token=token)
+        if data is not None:
+            handler.rfile = io.BytesIO(data)
+            handler.headers.update({"Content-Length": str(len(data)), "Content-Type": "video/mp4"})
+        handler.headers.update(headers or {})
+        handler.response_headers = {}
+        handler.send_header = lambda key, value: handler.response_headers.update({key: value})
+        try:
+            cm_server.route(handler, method)
+        except cm_server.ApiError as exc:
+            cm_server.jresp(handler, exc.code, {"error": exc.msg})
+        return handler
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg unavailable")
+    def test_video_banner_normalization_range_and_validation(self):
+        uid, token = self.user("video-banner-owner")
+        profile = f"/users/{uid}/profile"
+        upload = "/profile/banner"
+
+        def make_clip(seconds):
+            source = Path(self.tmp.name) / f"source-{seconds}.mov"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=120x200:rate=24",
+                            "-f", "lavfi", "-i", "sine=frequency=440", "-t", str(seconds),
+                            "-c:v", "libx264", "-threads", "1", "-c:a", "aac", str(source)], check=True)
+            return source.read_bytes()
+
+        source = make_clip(5)
+        self.assertEqual(self.banner_request("PUT", upload, data=source).status, 401)
+        saved = self.banner_request("PUT", upload, token=token, data=source, headers={"Content-Type": "video/quicktime"})
+        self.assertEqual(saved.status, 200, saved.wfile.getvalue())
+        result = json.loads(saved.wfile.getvalue())
+        path = result["bannerUrl"]
+        self.assertEqual(result["bannerType"], "video")
+        others = [self.call("GET", profile)[1]["user"], self.call("GET", "/profile", token=token)[1],
+                  self.call("GET", "/auth/me", token=token)[1]]
+        for fields in others:
+            self.assertEqual({key: fields[key] for key in result}, result)
+
+        full = self.banner_request("GET", path)
+        data = full.wfile.getvalue()
+        self.assertEqual(full.response_headers["Content-Type"], "video/mp4")
+        self.assertEqual(full.response_headers["Accept-Ranges"], "bytes")
+        self.assertEqual(int(full.response_headers["Content-Length"]), len(data))
+        self.assertLess(data.index(b"moov"), data.index(b"mdat"))
+        output = Path(self.tmp.name) / "banner.mp4"
+        output.write_bytes(data)
+        reported = subprocess.check_output(["ffprobe", "-v", "error", "-show_entries",
+                                            "stream=codec_type,codec_name,width,height,duration", "-of", "json", str(output)])
+        self.assertEqual(json.loads(reported)["streams"], [{"codec_name": "h264", "codec_type": "video", "width": 720,
+                                                           "height": 480, "duration": "5.000000"}])
+
+        part = self.banner_request("GET", path, headers={"Range": "bytes=0-1"})
+        self.assertEqual(part.status, 206)
+        self.assertEqual(part.response_headers["Content-Range"], f"bytes 0-1/{len(data)}")
+        self.assertEqual(part.wfile.getvalue(), data[:2])
+        self.assertEqual(self.banner_request("GET", path, headers={"Range": f"bytes={len(data)}-"}).status, 416)
+        self.assertEqual(self.banner_request("GET", path, headers={"If-None-Match": full.response_headers["ETag"]}).status, 304)
+
+        for invalid in (b"not video", make_clip(5.25)):
+            self.assertEqual(self.banner_request("PUT", upload, token=token, data=invalid).status, 400)
+        oversized = {"Content-Length": str(cm_profile_banner.VIDEO_BYTES + 1)}
+        self.assertEqual(self.banner_request("PUT", upload, token=token, data=b"", headers=oversized).status, 413)
+        self.assertEqual(self.call("GET", profile)[1]["user"]["bannerUrl"], path)
+
+        self.assertEqual(self.call("DELETE", upload, token=token), (200, {"bannerUrl": ""}))
+        self.assertEqual(self.call("GET", path)[0], 404)

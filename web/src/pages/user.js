@@ -498,7 +498,7 @@ async function renderProfile(el, autoDecor) {
   el.innerHTML = `
     <div class="cm-profile">
       <div class="cm-community-profile">
-        ${profileBannerHTML(u.bannerUrl, true)}
+        ${profileBannerHTML(u, true)}
         <div class="cm-profile-head">
           <div id="avaWrap" class="cm-ava-wrap" role="button" tabindex="0" title="点击更换头像"
                aria-label="更换头像">${avatarHTML(u, 84)}<span class="cm-ava-cam"><span class="material-icons-outlined">photo_camera</span></span></div>

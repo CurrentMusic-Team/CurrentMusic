@@ -26,6 +26,8 @@ import cm_feedback_diagnostics as diagnostics
 log = logging.getLogger("cm")
 IMAGE_BYTES = 2 * 1024 ** 2
 VIDEO_BYTES = 25 * 1024 ** 2
+MOV_INPUT_ARGS = ["-max_alloc", "67108864", "-protocol_whitelist", "file", "-enable_drefs", "0",
+                  "-use_absolute_path", "0", "-f", "mov", "-max_streams", "16"]
 TOTAL_BYTES = 3 * IMAGE_BYTES + VIDEO_BYTES
 STAGING_TTL = 3600
 SLOTS = {f"screenshot-{n}": ("image/jpeg", "image/png") for n in range(1, 4)}
@@ -154,7 +156,7 @@ def _admit(conn, uid, request_id, declared, now, repeated):
         conn.execute("INSERT OR REPLACE INTO feedback_media_quota VALUES(?,?,1)", (uid, now))
 
 
-def _read_body(handler, target, length):
+def read_upload(handler, target, length):
     remaining = length
     checksum = hashlib.sha256()
     deadline = time.monotonic() + 90
@@ -182,7 +184,7 @@ def _read_body(handler, target, length):
     return checksum.hexdigest()
 
 
-def _process(args, size, timeout, stdout=subprocess.DEVNULL, *, work):
+def process_media(args, size, timeout, stdout=subprocess.DEVNULL, *, work):
     try:
         result = subprocess.run([sys.executable, str(_WORKER), str(size), *map(str, args)],
                                 stdout=stdout, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
@@ -205,13 +207,12 @@ def _video(source, target):
     if not probe or not ffmpeg:
         raise MediaError(503, _UNAVAILABLE)
     # Restrict the demuxer, protocols and MOV data references before opening user bytes.
-    input_args = ["-max_alloc", "67108864", "-protocol_whitelist", "file", "-enable_drefs", "0",
-                  "-use_absolute_path", "0", "-f", "mov", "-max_streams", "16"]
+    input_args = MOV_INPUT_ARGS
     with source.open("rb") as handle:
         if handle.read(8)[4:] != b"ftyp":
             raise MediaError(415, "录屏须为 MP4 容器")
     with tempfile.TemporaryFile(dir=source.parent) as report:
-        _process(["exec", probe, "-v", "error", *input_args, "-show_entries",
+        process_media(["exec", probe, "-v", "error", *input_args, "-show_entries",
                   "format=duration:format_tags=major_brand:stream=index,codec_type,codec_name,width,height,duration:stream_disposition=attached_pic",
                   "-of", "json", str(source)], 65536, 10, report, work=source.parent)
         report.seek(0)
@@ -238,7 +239,7 @@ def _video(source, target):
     if audio:
         mapping += ["-map", f"0:{audio['index']}"]
     try:
-        _process(["exec", ffmpeg, "-nostdin", "-v", "error", "-xerror", *input_args, "-i", source,
+        process_media(["exec", ffmpeg, "-nostdin", "-v", "error", "-xerror", *input_args, "-i", source,
                   *mapping, "-c", "copy", "-map_metadata", "-1", "-map_metadata:s", "-1", "-map_chapters", "-1",
                   "-bsf:v", "filter_units=remove_types=6", "-movflags", "+faststart", "-f", "mp4", target],
                  VIDEO_BYTES, 15, work=source.parent)
@@ -247,7 +248,7 @@ def _video(source, target):
             raise MediaError(413, "处理后的媒体超过大小限制") from exc
         raise
     # Stream copy removes container metadata but cannot detect corrupt H.264/AAC bitstreams.
-    _process(["exec", ffmpeg, "-nostdin", "-v", "error", "-xerror", "-err_detect", "explode",
+    process_media(["exec", ffmpeg, "-nostdin", "-v", "error", "-xerror", "-err_detect", "explode",
               *input_args, "-threads", "1", "-i", target, "-map", "0:v:0", "-map", "0:a:0?",
               "-threads", "1", "-filter_threads", "1", "-f", "null", "-"],
              VIDEO_BYTES, 35, work=source.parent)
@@ -257,7 +258,7 @@ def _prepare(source, target, kind, limit):
     if kind == "video/mp4":
         _video(source, target)
     else:
-        _process(["screenshot", source, target, kind, 4096, 12_000_000], limit, 12, work=source.parent)
+        process_media(["screenshot", source, target, kind, 4096, 12_000_000], limit, 12, work=source.parent)
     target.chmod(0o600)
     with target.open("rb") as handle:
         size = os.fstat(handle.fileno()).st_size
@@ -302,7 +303,7 @@ def upload(handler, uid, request_id, slot, retention):
 
         with tempfile.TemporaryDirectory(prefix=".media-", dir=root) as temp:
             source, target = Path(temp) / "source", Path(temp) / "clean"
-            digest = _read_body(handler, source, length)
+            digest = read_upload(handler, source, length)
             with closing(cm_db.connect()) as conn:
                 now = int(time.time())
                 _require_unsubmitted(conn, uid, request_id, now, retention)

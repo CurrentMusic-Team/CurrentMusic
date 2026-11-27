@@ -6,7 +6,9 @@
   background: linear-gradient(116deg, var(--cm-primary), rgb(var(--mdui-color-primary-container)), rgb(var(--mdui-color-secondary-container)));
 }
 .cm-profile-banner::before { content: ""; display: block; padding-top: 25%; }
-.cm-profile-banner > img {
+.cm-profile-banner-custom::before { padding-top: calc(100% * 2 / 3); }
+.cm-profile-banner > img,
+.cm-profile-banner > video {
   position: absolute;
   inset: 0;
   top: 0;
@@ -207,7 +209,7 @@ html[data-ui-preset="aimo"] .cm-post-act.on { color: #e5484d !important; }
 [data-more][hidden] { display: none; }
 
 @media (max-width: 480px) {
-  .cm-profile .cm-profile-banner::before { padding-top: max(25%, 76px); }
+  .cm-profile .cm-profile-banner:not(.cm-profile-banner-custom)::before { padding-top: max(25%, 76px); }
   .cm-post-detail > .cm-post,
   .cm-post-comments { padding: 12px; }
 }
