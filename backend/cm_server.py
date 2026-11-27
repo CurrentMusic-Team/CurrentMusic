@@ -31,6 +31,7 @@ import cm_feedback
 import cm_feedback_diagnostics
 import cm_feedback_media
 import cm_image
+import cm_profile_banner
 import cm_lx
 import cm_lddc
 import cm_levels
@@ -298,7 +299,7 @@ def _payload_daily(u):
 def _payload_me(u):
     """当前用户资料 + 统计 + 挂件解锁状态。原 /auth/me 逻辑。"""
     out = public_user(u)
-    out["bannerUrl"] = _profile_banner_url(u["id"])
+    out.update(_profile_banner_fields(u["id"]))
     out["points"] = u["points"]
     protection = cm_2fa.status(u["id"])
     out["twoFactorEnabled"] = protection["enabled"]
@@ -1848,13 +1849,52 @@ def public_user(u):
     }
 
 
-def _profile_banner_url(uid, version=None):
+def _profile_banner_fields(uid, version=None, content_type=None):
     if version is None:
         banner = cm_db.get_profile_banner(uid)
         if not banner:
-            return ""
+            return {"bannerUrl": ""}
         version = banner["version"]
-    return f"/users/{uid}/banner?v={version}"
+        content_type = banner["content_type"]
+    fields = {"bannerUrl": f"/users/{uid}/banner?v={version}"}
+    if content_type == "video/mp4":
+        fields["bannerType"] = "video"
+    return fields
+
+
+def _serve_profile_banner(handler, banner):
+    etag = '"' + banner["version"] + '"'
+    data = banner["image"]
+    size = len(data)
+    video = banner["content_type"] == "video/mp4"
+    status = 200
+    if handler.headers.get("If-None-Match") == etag:
+        status = 304
+    elif video and handler.headers.get("If-Range", etag) == etag and not getattr(handler, "head_only", False):
+        match = re.fullmatch(r"bytes=([0-9]{0,20})-([0-9]{0,20})", handler.headers.get("Range", ""))
+        if match and any(match.groups()):
+            first, last = match.groups()
+            start = int(first) if first else max(0, size - int(last))
+            end = min(size - 1, int(last)) if first and last else size - 1
+            status = 206 if start <= end else 416
+            data = data[start:end + 1] if status == 206 else b""
+
+    handler.send_response(status)
+    handler.send_header("ETag", etag)
+    handler.send_header("Cache-Control", "public, no-cache")
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    if video:
+        handler.send_header("Accept-Ranges", "bytes")
+    if status == 206:
+        handler.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+    elif status == 416:
+        handler.send_header("Content-Range", f"bytes */{size}")
+    if status != 304:
+        handler.send_header("Content-Type", banner["content_type"])
+        handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    if status != 304:
+        handler.wfile.write(data)
 
 
 def _community_id(value):
@@ -1882,8 +1922,8 @@ def _prepare_profile_banner(encoded):
         raise ApiError(503, "横幅图片处理暂不可用")
     try:
         source = ImageOps.exif_transpose(cm_image.open_image(data)).convert("RGBA")
-        width = max(4, min(1600, source.width, source.height * 4) // 4 * 4)
-        crop = ImageOps.fit(source, (width, width // 4), method=Image.LANCZOS)
+        units = max(1, min(1600 // 3, source.width // 3, source.height // 2))
+        crop = ImageOps.fit(source, (units * 3, units * 2), method=Image.LANCZOS)
         image = Image.new("RGB", crop.size, (32, 34, 44))
         image.paste(crop, mask=crop.getchannel("A"))
         out = BytesIO()
@@ -2423,13 +2463,14 @@ def route(handler, method):
     path = parsed.path.rstrip("/") or "/"
     q = {k: v[0] for k, v in parse_qs(parsed.query, keep_blank_values=True).items()}
     feedback_post = path == "/feedback" and method == "POST"
+    banner_put = path == "/profile/banner" and method == "PUT"
     feedback_media = re.fullmatch(r"/feedback/([0-9a-f]{32})/media/(screenshot-[123]|video-1)", path)
     audio_report = path == "/usage/audio" and method == "POST"
     if audio_report:
         size = handler.headers.get("Content-Length") or "0"
         if not size.isdecimal() or len(size) > 3 or int(size) > 256:
             raise ApiError(400, "请求体过大")
-    body = read_json(handler) if method in ("POST", "PUT", "DELETE") and not (feedback_post or feedback_media) else None
+    body = read_json(handler) if method in ("POST", "PUT", "DELETE") and not (feedback_post or feedback_media or banner_put) else None
     # 限速按**真实客户端**分桶。此前用 handler.client_address（= nginx 的 127.0.0.1），
     # 全站共用一个 300/min 的桶：几个用户同时切歌就会把播放地址解析打成 429。
     ip = cm_ncm_gateway.rate_key(handler)
@@ -3312,7 +3353,7 @@ def route(handler, method):
             ("POST", "/auth/logout", "Bearer", "退出当前设备并撤销会话"),
             ("GET", "/auth/me", "Bearer", "当前账户资料与统计（含 bannerUrl、累计积分 points 和等级 level）"),
             ("GET", "/profile", "Bearer", "当前账户资料与统计（bannerUrl 为 API 基址相对路径，空串表示未设置）"),
-            ("PUT", "/profile/banner", "Bearer", "上传或替换自己的公开主页横幅 {data: Base64}，返回 {bannerUrl}"),
+            ("PUT", "/profile/banner", "Bearer", "上传或替换公开主页横幅（3∶2 图片或最长 5 秒的视频），返回 bannerUrl"),
             ("DELETE", "/profile/banner", "Bearer", "移除自己的公开主页横幅，返回空 bannerUrl"),
             ("GET", "/auth/sessions", "Bearer", "在线设备列表 {max:null,sessions}；数量不限，超过 5 台时客户端提示风险"),
             ("DELETE", "/auth/sessions/{id}", "Bearer", "下线指定设备"),
@@ -3440,7 +3481,7 @@ def route(handler, method):
             ("GET", "/chat/live", "公开", "聊天实时流：?sse=1 走 SSE（message/delete/edit 事件，id=seq 断线续传；edit.payload={id,content,atts,streaming}，AI 流式回答用同一 id 反复更新）；不带则返回 JSON 增量"),
             ("POST", "/ai/live", "Bearer", "播放页「问AI」：SSE（start/delta/done/error）流式回答 {question≤500字, song:{type:'song',id,name,sub?,pic?}, reset?:bool}；delta.text 为累计文本；scope=player 与公共 Chat 隔离，reset=true 先清空播放页上下文"),
             ("GET", "/users/{id}/profile", "公开", "公开用户主页（含 user.bannerUrl 和 user.ipRegion）"),
-            ("GET", "/users/{id}/banner", "公开", "读取当前主页横幅 JPEG，v 可指定版本"),
+            ("GET", "/users/{id}/banner", "公开", "读取当前主页横幅 JPEG 或 MP4，v 可指定版本"),
             ("GET", "/posts", "可选登录", "发现动态列表，可按 author 筛选，支持 offset 与 limit"),
             ("POST", "/posts", "Bearer", "发布动态 {title?, content, attachments?}，返回 {id}"),
             ("GET", "/posts/{id}", "可选登录", "单条帖子详情，返回与列表一致的帖子结构"),
@@ -3993,7 +4034,7 @@ def route(handler, method):
     if path == "/profile" and method == "GET":
         u = require_user(handler)
         out = public_user(u)
-        out["bannerUrl"] = _profile_banner_url(u["id"])
+        out.update(_profile_banner_fields(u["id"]))
         out["stat"] = cm_db.user_stat(u["id"])
         return jresp(handler, 200, out)
 
@@ -4006,12 +4047,24 @@ def route(handler, method):
 
     if path == "/profile/banner" and method == "PUT":
         u = require_user(handler, allow_query=False)
-        if not isinstance(body, dict):
-            raise ApiError(400, "横幅数据无效")
-        image = _prepare_profile_banner(body.get("data"))
-        version = hashlib.sha256(image).hexdigest()[:24]
-        cm_db.set_profile_banner(u["id"], version, image)
-        return jresp(handler, 200, {"bannerUrl": _profile_banner_url(u["id"], version)})
+        upload_type = handler.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if upload_type in cm_profile_banner.VIDEO_TYPES:
+            try:
+                data = cm_profile_banner.upload_video(handler)
+            except cm_feedback_media.MediaError as exc:
+                raise ApiError(exc.status, str(exc)) from exc
+            content_type = "video/mp4"
+        elif upload_type in ("", "application/json"):
+            body = read_json(handler)
+            if not isinstance(body, dict):
+                raise ApiError(400, "横幅数据无效")
+            data = _prepare_profile_banner(body.get("data"))
+            content_type = "image/jpeg"
+        else:
+            raise ApiError(415, "横幅上传仅支持 JSON 图片、MP4 或 MOV 视频")
+        version = hashlib.sha256(data).hexdigest()[:24]
+        cm_db.set_profile_banner(u["id"], version, data, content_type)
+        return jresp(handler, 200, _profile_banner_fields(u["id"], version, content_type))
 
     if path == "/profile/banner" and method == "DELETE":
         u = require_user(handler, allow_query=False)
@@ -4024,19 +4077,7 @@ def route(handler, method):
         version = q.get("v")
         if not banner or (version and version != banner["version"]):
             raise ApiError(404, "横幅不存在")
-        etag = '"' + banner["version"] + '"'
-        unchanged = handler.headers.get("If-None-Match") == etag
-        handler.send_response(304 if unchanged else 200)
-        handler.send_header("ETag", etag)
-        handler.send_header("Cache-Control", "public, no-cache")
-        handler.send_header("Access-Control-Allow-Origin", "*")
-        if not unchanged:
-            handler.send_header("Content-Type", "image/jpeg")
-            handler.send_header("Content-Length", str(len(banner["image"])))
-        handler.end_headers()
-        if not unchanged:
-            handler.wfile.write(banner["image"])
-        return
+        return _serve_profile_banner(handler, banner)
 
     # ---- 修改密码：原密码 或 邮箱验证码（v1.28.76）----
     # 已登录用户忘记原密码时，可让服务端把验证码发到**当前账号绑定**的邮箱；
@@ -4970,7 +5011,7 @@ def route(handler, method):
         prof = cm_db.public_profile(int(m.group(1)))
         if not prof:
             raise ApiError(404, "用户不存在")
-        prof["user"]["bannerUrl"] = _profile_banner_url(prof["user"]["id"])
+        prof["user"].update(_profile_banner_fields(prof["user"]["id"]))
         if prof["user"].get("public"):
             f = followed_netease(int(m.group(1)))
             if f and f.get("artists"):

@@ -112,16 +112,16 @@ window.__cmHttpDone = function (id, status, body) {
   else p.reject(Object.assign(new Error((data && data.error) || `HTTP ${status}`), { status, code: data?.code }));
 };
 
-async function rawRequest(method, url, headers, bodyStr, keepalive = false, redirect) {
-  if (bridged && redirect !== 'error') {
+async function rawRequest(method, url, headers, body, keepalive = false, redirect) {
+  if (bridged && typeof body === 'string' && redirect !== 'error') {
     return new Promise((resolve, reject) => {
       const id = 'r' + (++seq);
       pending.set(id, { resolve, reject });
-      window.NativeApi.http(id, method, url, JSON.stringify(headers || {}), bodyStr || '');
+      window.NativeApi.http(id, method, url, JSON.stringify(headers || {}), body);
     });
   }
-  const requestHeaders = { ...(bodyStr ? { 'Content-Type': 'application/json' } : {}), ...(headers || {}) };
-  const r = await fetch(url, { method, headers: requestHeaders, body: bodyStr || undefined, keepalive, redirect });
+  const requestHeaders = { ...(body && typeof body === 'string' ? { 'Content-Type': 'application/json' } : {}), ...(headers || {}) };
+  const r = await fetch(url, { method, headers: requestHeaders, body: body || undefined, keepalive, redirect });
   let data = null;
   try { data = await r.json(); } catch { /* 空体 */ }
   if (r.ok) return data;
@@ -131,15 +131,15 @@ async function rawRequest(method, url, headers, bodyStr, keepalive = false, redi
 let onAuthExpired = null;
 export function setAuthExpiredHandler(fn) { onAuthExpired = fn; }
 
-export async function call(method, path, { body, auth: needAuth = false, keepalive = false, base = settings.base, redirect } = {}) {
+export async function call(method, path, { body, file, auth: needAuth = false, keepalive = false, base = settings.base, redirect } = {}) {
   const headers = {};
   // 记录“请求发出时是否带过 token”：只有带过 token 的 401 才是会话失效；
   // 游客（本来就没登录）的 401 交给播放等入口自行引导登录，不能报“登录已失效”。
   const hadToken = !!(needAuth && auth.token);
   if (hadToken) headers.Authorization = 'Bearer ' + auth.token;
-  const bodyStr = body !== undefined ? JSON.stringify(body) : '';
+  const payload = file || (body !== undefined ? JSON.stringify(body) : '');
   try {
-    return await rawRequest(method, base + path, headers, bodyStr, keepalive, redirect);
+    return await rawRequest(method, base + path, headers, payload, keepalive, redirect);
   } catch (e) {
     // 401 有两种来源：项目会话失效（该提示重新登录）与「尚未绑定网易云」（该引导去绑定）。
     // 后者按状态码一律当成会话失效会误报「登录已失效」，所以按文案区分。
@@ -371,6 +371,7 @@ export const api = {
   changePasswordByEmail: (emailCode, newPassword) => call('PUT', '/profile/password', { body: { emailCode, newPassword }, auth: true }),
   uploadAvatarBase64: (b64) => call('PUT', '/profile/avatar', { body: { data: b64 }, auth: true }),
   uploadProfileBanner: (data) => call('PUT', '/profile/banner', { body: { data }, auth: true }),
+  uploadProfileBannerVideo: (file) => call('PUT', '/profile/banner', { file, auth: true, redirect: 'error' }),
   removeProfileBanner: () => call('DELETE', '/profile/banner', { auth: true }),
   profileBannerUrl: (path) => /^\/users\/\d+\/banner\?v=[0-9a-f]{24}$/.test(path) ? settings.base + path : '',
   // 头像挂件：目录（带 token 时附本人解锁状态）；素材固定 .gif/.png 由后端按 id 寻址

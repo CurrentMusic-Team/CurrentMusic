@@ -294,7 +294,8 @@ CREATE INDEX IF NOT EXISTS idx_posts_author ON posts(user_id, id);
 CREATE TABLE IF NOT EXISTS profile_banners (
   user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   version TEXT NOT NULL,
-  image BLOB NOT NULL
+  image BLOB NOT NULL,
+  content_type TEXT NOT NULL DEFAULT 'image/jpeg'
 );
 CREATE TABLE IF NOT EXISTS post_likes (
   post_id INTEGER NOT NULL,
@@ -765,6 +766,8 @@ def init():
     post_columns = {r[1] for r in conn.execute("PRAGMA table_info(posts)")}
     if "title" not in post_columns:
         conn.execute("ALTER TABLE posts ADD COLUMN title TEXT NOT NULL DEFAULT ''")
+    if "content_type" not in {r[1] for r in conn.execute("PRAGMA table_info(profile_banners)")}:
+        conn.execute("ALTER TABLE profile_banners ADD COLUMN content_type TEXT NOT NULL DEFAULT 'image/jpeg'")
     # post_comments 后加的列（老库补列；新库由 SCHEMA 直接建全）：回复目标评论 id
     pccols = {r[1] for r in conn.execute("PRAGMA table_info(post_comments)")}
     if pccols and "reply_to" not in pccols:
@@ -2166,16 +2169,17 @@ def square_users(query="", sort="composite", limit=30, offset=0, listening_only=
         conn.close()
 
 
-def set_profile_banner(uid, version="", image=None):
+def set_profile_banner(uid, version="", image=None, content_type="image/jpeg"):
     conn = connect()
     try:
         if image is None:
             conn.execute("DELETE FROM profile_banners WHERE user_id=?", (uid,))
         else:
             conn.execute(
-                """INSERT INTO profile_banners(user_id, version, image) VALUES(?, ?, ?)
-                   ON CONFLICT(user_id) DO UPDATE SET version=excluded.version, image=excluded.image""",
-                (uid, version, image),
+                """INSERT INTO profile_banners(user_id, version, image, content_type) VALUES(?, ?, ?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET version=excluded.version, image=excluded.image,
+                   content_type=excluded.content_type""",
+                (uid, version, image, content_type),
             )
         conn.commit()
     finally:
@@ -2185,7 +2189,7 @@ def set_profile_banner(uid, version="", image=None):
 def get_profile_banner(uid, *, include_image=False):
     conn = connect()
     try:
-        columns = "b.version, b.image" if include_image else "b.version"
+        columns = "b.version, b.content_type, b.image" if include_image else "b.version, b.content_type"
         return conn.execute(
             f"""SELECT {columns} FROM profile_banners b JOIN users u ON u.id=b.user_id
                 WHERE b.user_id=? AND u.disabled=0 AND u.username!='__internal__'""", (uid,)

@@ -4,15 +4,18 @@
 
 ## 主页横幅
 
-`GET /cm/auth/me`、`GET /cm/profile` 返回当前账号的 `bannerUrl`。`GET /cm/users/{id}/profile` 可匿名读取，横幅字段位于 `user.bannerUrl`。空串表示未设置。将非空值接在当前 API 基地址（包含 `/cm`）后，例如 `https://music.20110208.xyz/cm/users/42/banner?v=...`。
+`GET /cm/auth/me`、`GET /cm/profile` 返回当前账号的 `bannerUrl`。`GET /cm/users/{id}/profile` 可匿名读取，横幅字段位于 `user` 对象。`bannerUrl` 为空串表示未设置。视频横幅同时返回 `bannerType: "video"`，图片横幅省略此字段。将非空路径接在当前 API 基地址（包含 `/cm`）后，例如 `https://music.20110208.xyz/cm/users/42/banner?v=...`。
 
 | 方法 | 路径 | 行为 |
 | --- | --- | --- |
-| PUT | `/cm/profile/banner` | 用 JSON `{"data":"BASE64_IMAGE"}` 上传或替换当前账号的横幅，返回 `{"bannerUrl":"/users/42/banner?v=..."}` |
+| PUT | `/cm/profile/banner` | 上传或替换横幅。图片使用 JSON `{"data":"BASE64_IMAGE"}`，视频使用原始 MP4 或 MOV 文件。返回 `bannerUrl`，视频另返回 `bannerType` |
 | DELETE | `/cm/profile/banner` | 清除当前账号的横幅。重复删除仍返回 `{"bannerUrl":""}` |
-| GET | `/cm/users/{id}/banner` | 公开读取当前横幅，返回 `image/jpeg`。可用 `v` 指定版本，与当前版本一致时支持 ETag 验证 |
+| GET、HEAD | `/cm/users/{id}/banner` | 公开读取当前横幅，返回 `image/jpeg` 或 `video/mp4`。可用 `v` 指定版本，并使用 ETag 验证。视频支持单段字节范围请求 |
 
-上传接受 JPEG、PNG、WebP 的标准 Base64 字符串，解码后最多 1 MiB、最多 2500 万像素。服务端按 EXIF 校正方向，居中裁剪为 4∶1 并转成 JPEG，最长边最多 1600 像素。上传格式错误或超过限制返回 400，图片处理组件不可用返回 503。读取缺失、已移除或已替换的版本返回 404。用户横幅会公开展示。
+- 图片接受 JPEG、PNG、WebP，解码后最多 1 MiB、2500 万像素。服务端按 EXIF 校正方向，居中裁剪为 3∶2 并转成 JPEG，最长边最多 1600 像素。旧图片仍可读取，Web 以 3∶2 居中展示。
+- 视频使用 `Content-Type: video/mp4` 或 `video/quicktime` 并提供 `Content-Length`。文件最多 16 MiB，视频轨最长 5 秒，最长边最多 3840 像素，总像素数最多 8,294,400。服务端校正旋转方向并居中裁剪，输出 720×480 的无声 H.264 MP4。Web 静音循环播放。
+
+不符合格式、时长或尺寸限制的文件返回 400。请求媒体类型不受支持时返回 415，视频超过大小限制时返回 413，媒体处理组件不可用时返回 503。读取缺失、已移除或已替换的版本返回 404。用户横幅会公开展示。
 
 ## 发布与浏览帖子
 
