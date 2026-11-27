@@ -5,12 +5,8 @@
 
 四件事：
 
-1. **档位策略**：把「取地址」与「校验地址」拆开——一轮**并行**取各档的地址与
-   元信息（上游 *br/type/size*），按旧口径择优后**只对胜出的那一档**做一次
-   2KB 音频头校验。旧实现是每档各校验一次（4 次 2KB 探测全串在上游往返后面），
-   由于两段是同一个串行线程里跑的，冷启动实测 2.0~2.7s；拆分后约 1 轮上游 + 1 次
-   校验，实测 ~1.6s，CDN 探测从 4 次降到 1 次。校验不通过（上游偶尔回 HTML 错误页）
-   就按择优顺序顺位重试，与旧实现的「该档不可用则降档」语义等价。
+1. **档位策略**：并行向上游取地址与元信息，再按自动音质顺序逐个校验候选地址。
+   第一个通过 2KB 音频头校验的档位用于播放。
 
 2. **解析单飞**：同一（歌曲, 档位, 上限, 用户 IP）的并发解析合并成一次上游往返。
    预取、正播、卡顿自愈经常同时打同一首，重复探测既慢又容易吃上游风控。
@@ -38,107 +34,37 @@ from concurrent.futures import ThreadPoolExecutor
 
 # ---------------------------------------------------------------- 档位策略
 
-# 按名义码率排序的常规音质档。杜比全景声单独按设备能力选择。
-TIERS = ("jymaster", "jyeffect", "sky", "hires", "lossless", "exhigh", "standard")
+QUALITY_PRIORITY = (
+    "vivid", "dolby", "jymaster", "sky", "jyeffect", "hires",
+    "lossless", "exhigh", "higher", "standard",
+)
+OPT_IN_TIERS = frozenset(("vivid", "dolby"))
+TIERS = tuple(level for level in QUALITY_PRIORITY if level not in OPT_IN_TIERS)
 
-# 旧实现就固定探测这 4 档（不含 hires）——保持一致，避免悄悄改变 auto 的结果。
-PROBE_TIERS = ("jymaster", "jyeffect", "sky", "lossless")
-
-# 给了明确上限时，可参与的档位放宽到全部 7 档（否则「上限 = 极高」这类请求
-# 会因为 exhigh/standard 不在探测集合里而一档都探不到）。
-CAP_TIERS = TIERS
-
-# 各档名义码率（bps，取自 README「音质档位」实测表）。
-# 用途：把 maxBr 量化到档位边界（收敛缓存键基数），并据此判定档位是否在上限内。
+# 以名义码率筛选档位。音质优先级由 QUALITY_PRIORITY 定义。
 NOMINAL_BR = {
     "jymaster": 5085163, "jyeffect": 2878732, "sky": 2056087, "hires": 1676530,
-    "lossless": 907568, "exhigh": 320001, "standard": 128001,
+    "lossless": 907568, "exhigh": 320001, "higher": 192000, "standard": 128001,
 }
-
-# 码率上限的合理区间（bps）。低于 64k 无意义，高于母带档按母带档处理。
-MAX_BR_FLOOR, MAX_BR_CEIL = 64_000, 10_000_000
 
 
 def quantize_max_br(max_br) -> int:
-    """把调用方给的码率上限**向下**量化到档位边界，收敛缓存键基数。
-
-    0 表示「不限」。这样 ``maxBr=1500000``/``1600000`` 都落到无损档（907568），
-    7 天的档位缓存不会被任意整数撑爆；向下取整保证「不会超过调用方给的上限」。
-    """
+    """把正数上限量化到名义码率边界，最低保留标准档。0 表示不限。"""
     try:
-        v = int(max_br or 0)
+        limit = int(max_br or 0)
     except (TypeError, ValueError):
         return 0
-    if v <= 0:
+    if limit <= 0:
         return 0
-    v = max(MAX_BR_FLOOR, min(MAX_BR_CEIL, v))
-    best = NOMINAL_BR[TIERS[-1]]                      # standard：最低也给它
-    for lv in reversed(CAP_TIERS):                    # 由低到高找「不超过 v 的最高档」
-        nb = NOMINAL_BR.get(lv, 0)
-        if nb <= v:
-            best = nb
-    return best
+    return max((br for br in NOMINAL_BR.values() if br <= limit), default=NOMINAL_BR["standard"])
 
 
-def allowed_levels(max_br: int = 0):
-    """该上限内允许的档位（降序）。不限时返回全部档位。"""
-    if not max_br:
-        return tuple(CAP_TIERS)
-    return tuple(lv for lv in CAP_TIERS if NOMINAL_BR.get(lv, 0) <= max_br)
-
-
-def probe_tiers(max_br: int = 0, supports_dolby: bool = False):
-    """要向上游取「地址 + 元信息」的档位（降序）。
-
-    - 不限码率：探测 4 个常规档，支持杜比的客户端额外探测杜比；
-    - 给了上限：放宽到该上限内的全部档位（否则「上限 = 极高」会因为
-      exhigh/standard 不在集合里而一档都取不到）。
-    """
-    if not max_br:
-        return ("dolby", *PROBE_TIERS) if supports_dolby else PROBE_TIERS
-    allowed = allowed_levels(max_br)
-    return allowed or ("standard",)
-
-
-def ranked(results, max_br: int = 0):
-    """优先选择已确认的杜比档，常规档按 score 降序排列。
-
-    调用方按这个顺序**逐个做音频头校验**：第一个校验通过的就是最终档位。
-    这样只需 1 次 2KB 校验（而不是每档都校验一次），同时保留「上游把某档
-    降级成错误页时自动顺位」的能力。
-    """
-    items = [(lv, r) for lv, r in results if r and within(lv, max_br)]
-    items.sort(key=lambda kv: (kv[0] == "dolby", score(kv[1])), reverse=True)
-    return items
-
-
-def score(r: dict):
-    """与旧 ``best_level`` 完全一致的排序键：先码率，再「是否真无损」，最后体积。"""
-    return (r.get("br") or 0, 1 if r.get("type") in ("flac", "wav") else 0, r.get("size") or 0)
-
-
-def within(level, max_br: int) -> bool:
-    """该档位是否在码率上限内——**按档位名义码率判定，不按实测码率**。
-
-    为什么不按实测码率：同一档位不同歌曲的实测码率有漂移（无损档实测 0.79~1.0Mbps
-    都见过），按实测值过滤会把「用户想要的无损」误伤掉。按档位判定语义也更直白：
-    `maxBr` = 「最多到什么档」。
-    """
-    if not max_br:
-        return True
-    if level == "dolby":
-        return False
-    return NOMINAL_BR.get(level, 0) <= max_br
-
-
-def pick(results, max_br: int = 0):
-    """按旧口径（score 最大）在 ``max_br`` 内择优，返回 ``(档位, 结果)``。
-
-    ``results`` 形如 ``[(level, result_or_None), ...]``；全部被上限排除时返回
-    ``(None, None)``。:func:`ranked` 是它的「全排序」版本，选择逻辑以它为准。
-    """
-    items = ranked(results, max_br)
-    return items[0] if items else (None, None)
+def probe_tiers(max_br: int = 0, supports_dolby: bool = False, *, supports_vivid: bool = False):
+    """按优先级返回设备能力及名义码率上限允许探测的档位。"""
+    if max_br:
+        return tuple(level for level in TIERS if NOMINAL_BR[level] <= max_br) or ("standard",)
+    capabilities = {"vivid": supports_vivid, "dolby": supports_dolby}
+    return tuple(level for level in QUALITY_PRIORITY if capabilities.get(level, True))
 
 
 # ---------------------------------------------------------------- CDN 边缘族
