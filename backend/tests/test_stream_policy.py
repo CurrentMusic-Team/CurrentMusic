@@ -19,11 +19,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import cm_stream as S  # noqa: E402
 
 
-def song(br, type_="flac", size=1000, level=""):
-    return {"url": f"https://m801.music.126.net/x/{level or br}.flac",
-            "br": br, "type": type_, "size": size, "level": level}
-
-
 class TestMaxBr(unittest.TestCase):
     """码率上限：向下量化到档位边界（保证不会超过调用方给的上限）。"""
 
@@ -48,53 +43,25 @@ class TestMaxBr(unittest.TestCase):
             self.assertLessEqual(q, max(v, S.NOMINAL_BR["standard"]), f"maxBr={v} → {q}")
 
     def test_allowed_levels_and_probe_tiers(self):
-        self.assertEqual(S.probe_tiers(0), S.PROBE_TIERS)          # 不限：与旧实现一致
-        allow = S.allowed_levels(S.NOMINAL_BR["lossless"])
-        self.assertEqual(allow, ("lossless", "exhigh", "standard"))
-        self.assertEqual(S.probe_tiers(S.NOMINAL_BR["lossless"]), allow)
-        # 上限低到只剩标准档时也必须探得到，不能变成空集合
-        self.assertEqual(S.probe_tiers(S.NOMINAL_BR["standard"]), ("standard",))
+        cap = S.quantize_max_br(1_000_000)
+        self.assertEqual(S.probe_tiers(cap, supports_dolby=True, supports_vivid=True),
+                         ("lossless", "exhigh", "higher", "standard"))
+        self.assertEqual(S.probe_tiers(S.quantize_max_br(192_000)), ("higher", "standard"))
+        self.assertEqual(S.probe_tiers(S.quantize_max_br(191_999)), ("standard",))
 
-    def test_within_is_level_based_not_measured(self):
-        # 按档位判定：实测码率有漂移（无损档实测 0.79~1.0Mbps 都见过），
-        # 按实测值过滤会把用户想要的无损误伤掉。
-        self.assertTrue(S.within("lossless", S.NOMINAL_BR["lossless"]))
-        self.assertFalse(S.within("sky", S.NOMINAL_BR["lossless"]))
-        self.assertTrue(S.within("jymaster", 0))
+    def test_cap_is_quantized_by_bitrate_and_probed_by_quality_priority(self):
+        cap = S.quantize_max_br(3_000_000)
+        self.assertEqual(cap, S.NOMINAL_BR["jyeffect"])
+        self.assertEqual(S.probe_tiers(cap)[:2], ("sky", "jyeffect"))
 
 
-class TestRanked(unittest.TestCase):
-    """择优：与旧 best_level 同口径（码率 → 真无损 → 体积），并按上限过滤。"""
-
-    def test_picks_max_bitrate(self):
-        rows = [("jymaster", song(320_000, "mp3")), ("sky", song(1_971_214))]
-        self.assertEqual(S.pick(rows, 0)[0], "sky")
-
-    def test_flac_beats_mp3_at_equal_bitrate(self):
-        rows = [("exhigh", song(320_000, "mp3")), ("lossless", song(320_000, "flac"))]
-        self.assertEqual(S.pick(rows, 0)[0], "lossless")
-
-    def test_ties_keep_probe_order(self):
-        # 旧实现是「严格大于才替换」，所以并列时先探到的档位胜出；排序必须稳定。
-        rows = [("jymaster", song(320_000, "mp3")), ("jyeffect", song(320_000, "mp3"))]
-        self.assertEqual(S.pick(rows, 0)[0], "jymaster")
-
-    def test_cap_filters_out_heavy_tiers(self):
-        rows = [("jymaster", song(5_085_163)), ("sky", song(1_971_214)),
-                ("lossless", song(907_568))]
-        cap = S.quantize_max_br(1_000_000)          # → 907568，只允许无损及以下
-        self.assertEqual(S.pick(rows, cap)[0], "lossless")
-        self.assertEqual([lv for lv, _ in S.ranked(rows, cap)], ["lossless"])
-
-    def test_none_results_are_ignored(self):
-        rows = [("jymaster", None), ("sky", song(1_971_214))]
-        self.assertEqual(S.pick(rows, 0)[0], "sky")
-        self.assertEqual(S.pick([("jymaster", None)], 0), (None, None))
-
-    def test_ranked_is_descending(self):
-        rows = [("lossless", song(907_568)), ("jymaster", song(5_085_163)),
-                ("sky", song(1_971_214))]
-        self.assertEqual([lv for lv, _ in S.ranked(rows, 0)], ["jymaster", "sky", "lossless"])
+class TestQualityPriority(unittest.TestCase):
+    def test_auto_priority_uses_independent_spatial_capabilities(self):
+        regular = ("jymaster", "sky", "jyeffect", "hires", "lossless", "exhigh", "higher", "standard")
+        self.assertEqual(S.probe_tiers(), regular)
+        self.assertEqual(S.probe_tiers(supports_dolby=True), ("dolby", *regular))
+        self.assertEqual(S.probe_tiers(supports_vivid=True), ("vivid", *regular))
+        self.assertEqual(S.probe_tiers(supports_dolby=True, supports_vivid=True), ("vivid", "dolby", *regular))
 
 
 class TestEdgeFamily(unittest.TestCase):

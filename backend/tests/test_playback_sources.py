@@ -1,4 +1,5 @@
 """Client IP isolation and verified grey-track fallback; never uses production data."""
+import hashlib
 import io
 import json
 import sys
@@ -47,7 +48,7 @@ class PlaybackSourceTests(unittest.TestCase):
                 self.assertEqual(out['level'], 'matched')
                 match.assert_called_once_with(1, real_ip=IP_A)
 
-    def test_auto_dolby_is_preferred_only_for_capable_clients_with_no_cap(self):
+    def test_auto_spatial_capabilities_are_independent_on_both_routes(self):
         token = self.token()
         requested = []
 
@@ -58,43 +59,84 @@ class PlaybackSourceTests(unittest.TestCase):
                               'level': level, 'br': 5_085_163 if level == 'jymaster' else 768_000}]}
 
         with mock.patch.object(cm_ncm, '_bounded_call', side_effect=upstream), \
-             mock.patch.object(cm_ncm, 'probe_audio', return_value=(True, {})):
-            route = '/ncm/song/url?id=1'
-            self.assertEqual(self.call('GET', route, token=token)[1]['level'], 'jymaster')
-            self.assertNotIn('dolby', requested)
-            self.assertEqual(self.call('GET', route + '&supportsDolby=1', token=token)[1]['level'], 'dolby')
+             mock.patch.object(cm_ncm, 'probe_audio', return_value=(True, {})) as probe:
+            primary = '/ncm/song/url?id=1'
+            engine = '/audio-sources/currentmusic-engine/resolve?id=1'
+            cases = [
+                (primary, '', 'jymaster', ()),
+                (engine, '&supportsDolby=1', 'dolby', ('dolby',)),
+                (engine, '&supportsVivid=1', 'vivid', ('vivid',)),
+                (primary, '&supportsVivid=1&supportsDolby=1', 'vivid', ('vivid', 'dolby')),
+                (primary, '&supportsVivid=1&supportsDolby=1&maxBr=192000', 'higher', ()),
+                (primary, '&supportsVivid=1&supportsDolby=1&level=jymaster', 'jymaster', ()),
+            ]
+            for route, flags, expected, spatial in cases:
+                with self.subTest(route=route, flags=flags):
+                    requested.clear()
+                    status, out = self.call('GET', route + flags, token=token)
+                    self.assertEqual((status, out['level']), (200, expected))
+                    self.assertEqual({lv for lv in requested if lv in ('dolby', 'vivid')}, set(spatial))
+                    if expected in ('dolby', 'vivid'):
+                        probe.assert_called_with(out['url'], strict=True)
             requested.clear()
-            self.assertEqual(self.call('GET', route, token=token)[1]['level'], 'jymaster')
-            self.assertEqual(self.call('GET', route + '&supportsDolby=1&maxBr=907568',
-                                       token=token)[1]['level'], 'lossless')
-            self.assertEqual(self.call('GET', route + '&supportsDolby=1&level=jymaster',
-                                       token=token)[1]['level'], 'jymaster')
-            self.assertNotIn('dolby', requested)
+            self.assertTrue(self.call('GET', primary, token=token)[1]['fromCache'])
+            self.assertEqual(requested, [])
 
-    def test_auto_dolby_falls_back_on_downgrade_missing_level_or_failed_probe(self):
+    def test_auto_validates_each_candidate_in_quality_priority_order(self):
+        expected = ('vivid', 'dolby', 'jymaster', 'sky', 'jyeffect', 'hires',
+                    'lossless', 'exhigh', 'higher', 'standard')
+        checked = []
+
         def upstream(path, q, *args, **kwargs):
             level = q['level']
-            actual = dolby_level if level == 'dolby' else level
-            return {'data': [{'url': f'https://audio.example.test/{level}', 'level': actual,
-                              'br': 5_085_163 if level == 'jymaster' else 768_000}]}
+            if level == 'dolby':
+                return {'data': [{'url': 'https://audio.example.test/trial',
+                                  'level': level, 'freeTrialInfo': {'end': 30}}]}
+            if level == 'jymaster':
+                return {'data': [{'url': 'https://audio.example.test/downgraded', 'level': 'jyeffect'}]}
+            if level == 'hires':
+                return {'data': [{'url': 'https://audio.example.test/missing-level'}]}
+            return {'data': [{'url': f'https://audio.example.test/{level}', 'level': level,
+                              'br': (expected.index(level) + 1) * 128_000}]}
 
-        def probe(url, **kwargs):
-            return not (url.endswith('/dolby') and reject_probe), {}
+        def probe(url, *, strict):
+            level = url.rsplit('/', 1)[-1]
+            checked.append((level, strict))
+            return level == 'standard', {}
 
         with mock.patch.object(cm_ncm, '_bounded_call', side_effect=upstream), \
              mock.patch.object(cm_ncm, 'probe_audio', side_effect=probe), \
              mock.patch.object(cm_ncm, 'song_url_match') as match:
-            for sid, (dolby_level, reject_probe) in enumerate(
-                    [('jyeffect', False), (None, False), ('dolby', True)], start=1):
-                with self.subTest(dolby_level=dolby_level, reject_probe=reject_probe):
-                    out = cm_server.resolve_play_url(sid, real_ip=IP_A, supports_dolby=True)
-                    self.assertEqual(out['level'], 'jymaster')
-            dolby_level, reject_probe = 'dolby', False
-            self.assertEqual(cm_server.resolve_play_url(4, real_ip=IP_A, supports_dolby=True)['level'], 'dolby')
-            dolby_level = 'jyeffect'
-            self.assertEqual(cm_server.resolve_play_url(4, real_ip=IP_A, supports_dolby=True,
-                                                        refresh=True)['level'], 'jymaster')
-            self.assertEqual(cm_server.resolve_play_url(4, real_ip=IP_A, supports_dolby=True)['level'], 'jymaster')
+            out = cm_server.resolve_play_url(1, real_ip=IP_A, supports_dolby=True, supports_vivid=True)
+            self.assertEqual(out['level'], 'standard')
+            match.assert_not_called()
+        self.assertEqual(checked, [('vivid', True), ('sky', False), ('jyeffect', False),
+                                   ('lossless', False), ('exhigh', False), ('higher', False), ('standard', False)])
+
+    def test_auto_refresh_reselects_when_cached_vivid_and_dolby_become_unavailable(self):
+        requested = []
+        available = {'vivid', 'dolby', 'jymaster'}
+
+        def upstream(path, q, *args, **kwargs):
+            level = q['level']
+            requested.append(level)
+            url = f'https://audio.example.test/{level}' if level in available else None
+            return {'data': [{'url': url, 'level': level}]}
+
+        opts = {'real_ip': IP_A, 'supports_dolby': True, 'supports_vivid': True}
+        with mock.patch.object(cm_ncm, '_bounded_call', side_effect=upstream), \
+             mock.patch.object(cm_ncm, 'probe_audio', return_value=(True, {})), \
+             mock.patch.object(cm_ncm, 'song_url_match') as match:
+            self.assertEqual(cm_server.resolve_play_url(1, **opts)['level'], 'vivid')
+            requested.clear()
+            available.remove('vivid')
+            self.assertEqual(cm_server.resolve_play_url(1, refresh=True, **opts)['level'], 'dolby')
+            self.assertEqual(requested.count('vivid'), 1)
+            available.remove('dolby')
+            self.assertEqual(cm_server.resolve_play_url(1, refresh=True, **opts)['level'], 'jymaster')
+            cached = cm_server.resolve_play_url(1, **opts)
+            self.assertEqual(cached['level'], 'jymaster')
+            self.assertTrue(cached['fromCache'])
             match.assert_not_called()
 
     def test_match_forwards_realip_without_cookie_and_reports_verified_quality(self):
@@ -223,15 +265,25 @@ class PlaybackSourceTests(unittest.TestCase):
         self.assertNotIn(private_value, logs.output[0])
         self.assertNotIn(private_value, str(error.exception))
 
-    def test_best_level_cache_is_scoped_to_client_ip(self):
-        result = {'url': 'https://audio.example.test/song.flac', 'level': 'lossless', 'type': 'flac', 'br': 900000}
-        with mock.patch.object(cm_ncm, 'song_url', return_value=result) as upstream, \
-             mock.patch.object(cm_ncm, 'probe_audio', return_value=(True, {})):
-            self.assertIsNotNone(cm_server.best_level(1, real_ip=IP_A)[1])
-            self.assertIsNone(cm_server.best_level(1, real_ip=IP_A)[1])
-            self.assertIsNotNone(cm_server.best_level(1, real_ip=IP_B)[1])
-            self.assertEqual(upstream.call_count, 8)
-            self.assertEqual({c.kwargs['real_ip'] for c in upstream.call_args_list}, {IP_A, IP_B})
+    def test_auto_ignores_legacy_caches_and_isolates_resolution_by_ip(self):
+        ip_hash = hashlib.sha256(IP_A.encode()).hexdigest()[:16]
+        cm_db.cache_set(f'blevel-ip:v1:1:0:{ip_hash}', json.dumps('lossless'), 600)
+        cm_db.cache_set(f'surl_req:1:auto::0:{IP_A}:err', '未取得播放地址', 600)
+        legacy = {'url': 'https://audio.example.test/legacy.mp3', 'level': 'standard'}
+        cm_db.cache_set(f'surl:v2:1:jymaster::0:{IP_A}', json.dumps(legacy), 600)
+
+        def upstream(path, q, *args, **kwargs):
+            level = q['level']
+            return {'data': [{'url': f'https://audio.example.test/{level}', 'level': level}]}
+
+        with mock.patch.object(cm_ncm, '_bounded_call', side_effect=upstream), \
+             mock.patch.object(cm_ncm, 'probe_audio', return_value=(True, {})) as probe:
+            first = cm_server.resolve_play_url(1, real_ip=IP_A)
+            again = cm_server.resolve_play_url(1, real_ip=IP_A)
+            other = cm_server.resolve_play_url(1, real_ip=IP_B)
+            self.assertEqual([out['level'] for out in (first, again, other)], ['jymaster'] * 3)
+            self.assertEqual([out['fromCache'] for out in (first, again, other)], [False, True, False])
+            self.assertEqual(probe.call_count, 2)
 
     def test_generic_media_cache_also_keeps_trusted_user_ip(self):
         token = self.token()

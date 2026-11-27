@@ -773,78 +773,71 @@ def auth_rate_limited(ip):
 
 # ---------- 服务端自动最高音质：探测特殊档（复用插件 v2.8.x 经验） ----------
 
-def _probe_one(ncm_id, level, real_ip=None, cn_ip=False):
-    """取某档的地址与元信息，**不做** 2KB 音频头校验（校验留给胜出档，见 best_level）。"""
+def _probe_one(ncm_id, level, real_ip, cn_ip, immerse):
     try:
-        r = cm_ncm.song_url(ncm_id, level, real_ip=real_ip, probe=False,
-                            require_exact=level == "dolby", cn_ip=cn_ip)
-        if r.get("level") == "dolby" and level != "dolby":
-            return level, None
-        return level, r
+        return cm_ncm.song_url(ncm_id, level, immerse, real_ip=real_ip, probe=False,
+                               require_exact=True, cn_ip=cn_ip)
     except cm_ncm.NcmError:
-        return level, None
+        return None
 
 
-# 解析单飞：预取 + 正播 + 卡顿自愈经常在同一瞬间打同一首歌，
-# 合并成一次上游往返（见 cm_stream.SingleFlight）。
+def _verify_auto_audio(ncm_id, level, result):
+    if result is None:
+        return None
+    ok, spec = cm_ncm.probe_audio(result["url"], strict=level in cm_stream.OPT_IN_TIERS)
+    if not ok:
+        log.info("档位校验未通过 song=%s level=%s（顺位降档）", ncm_id, level)
+        return None
+    return dict(result, sr=spec.get("sr") or 0, bits=spec.get("bits") or 0, ch=spec.get("ch") or 0)
+
+
+# 预取、正播和卡顿自愈同时解析时共用一轮取址及校验。
 _resolve_flight = cm_stream.SingleFlight()
 
 
-def best_level(ncm_id, real_ip=None, max_br=0, supports_dolby=False, cn_ip=False):
-    """探测档位并择优。返回 ``(档位名, 胜出档位的完整结果或 None)``。
+def _audio_capability_key(supports_dolby, supports_vivid):
+    return (":dolby" if supports_dolby else "") + (":vivid" if supports_vivid else "")
 
-    v1.28.23 起把「取地址」与「校验地址」拆成两段（见 cm_stream 的「档位策略」）：
 
-      1. **一轮并行**取各档的地址与元信息（`probe=False`，不打 CDN）；
-      2. 支持杜比时先校验真实杜比档，其余档位按码率、真无损、体积择优，**只对胜出的那一档**
-         做一次 2KB 音频头校验——拿到 sr/bits/ch，同时保证「下发的地址真能播」；
-      3. 校验不通过（上游偶发 HTML 错误页）就按择优顺序顺位重试下一档，
-         与旧实现「该档不可用则降档」的语义一致。
-
-    旧实现是 4 个线程各自「上游往返 + 2KB 校验」串行跑，冷启动实测 2.0~2.7s；
-    拆开后是 1 轮上游 + 1 次校验。
-
-    ``max_br``（bps，0=不限）把可选档位限制在该码率以内；只在 ``level=auto`` 时有意义。
-    返回的第二个值仍是「胜出档位已经取到的完整结果」，调用方可以直接用，省掉
-    「先探测档位、再打一次接口取同一首地址」的第二次上游往返（实测 2.81s → 1.4s）。
-    """
+def best_level(ncm_id, real_ip=None, max_br=0, supports_dolby=False, cn_ip=False, *,
+               supports_vivid=False, immerse=None):
+    """按设备能力并行取址，返回按优先级找到的第一个可用档位及音源。"""
     max_br = cm_stream.quantize_max_br(max_br)
-    # 国内 RealIP 模式下所有用户共享同一份解析结果（地址与边缘一致），键用固定标识。
-    ip_ident = "cn" if cn_ip else (real_ip or '')
+    tiers = cm_stream.probe_tiers(max_br, supports_dolby, supports_vivid=supports_vivid)
+    ip_ident = "cn" if cn_ip else (real_ip or "")
     ip_key = hashlib.sha256(ip_ident.encode()).hexdigest()[:16]
-    capability = ":dolby" if supports_dolby else ""
-    key = f"blevel-ip:v1:{int(ncm_id)}:{max_br}:{ip_key}{capability}"
-    cached = cm_db.cache_get(key)
-    if cached:
-        return cached.strip('"'), None
+    capability = _audio_capability_key("dolby" in tiers, "vivid" in tiers)
+    key = f"blevel-ip:v2:{int(ncm_id)}:{max_br}:{ip_key}:{immerse or ''}{capability}"
 
-    tiers = cm_stream.probe_tiers(max_br, supports_dolby)
+    def fetch(level):
+        return _probe_one(ncm_id, level, real_ip, cn_ip, immerse)
 
-    def _run_plan():
-        with ThreadPoolExecutor(max_workers=max(1, len(tiers))) as ex:
-            return list(ex.map(lambda lv: _probe_one(ncm_id, lv, real_ip, cn_ip), tiers))
+    def select():
+        cached = (cm_db.cache_get(key) or "").strip('"')
+        if cached in tiers:
+            out = _verify_auto_audio(ncm_id, cached, fetch(cached))
+            if out is not None:
+                return cached, out
+            cm_db.cache_delete(key)
 
-    # 单飞键含 real_ip：上游按 realIP 选 CDN 边缘，把「给别人选的节点」发给别人
-    # 正是要避免的事（与 surl 缓存键同一口径）。
-    t_levels = time.time()
-    results = _resolve_flight.do(
-        f"blevel:{int(ncm_id)}:{max_br}:{ip_ident}{capability}", _run_plan, timeout=8.0)
-    level_ms = int((time.time() - t_levels) * 1000)
+        candidates = tuple(level for level in tiers if level != cached)
+        started = time.monotonic()
+        with ThreadPoolExecutor(max_workers=max(1, len(candidates))) as executor:
+            results = list(executor.map(fetch, candidates))
+        level_ms = int((time.monotonic() - started) * 1000)
 
-    for lv, r in cm_stream.ranked(results, max_br):
-        ok, spec = cm_ncm.probe_audio(r["url"], strict=True) if lv == "dolby" else cm_ncm.probe_audio(r["url"])
-        if not ok:
-            log.info("档位校验未通过 song=%s level=%s（顺位降档）", ncm_id, lv)
-            continue
-        out = dict(r)
-        out["sr"] = spec.get("sr") or 0
-        out["bits"] = spec.get("bits") or 0
-        out["ch"] = spec.get("ch") or 0
-        cm_db.cache_set(key, json.dumps(lv), PLAY_URL_TTL if supports_dolby else 7 * 86400)
-        if level_ms >= 2000:
-            log.warning("档位探测偏慢 song=%s 取址=%dms 档位=%s", ncm_id, level_ms, lv)
-        return lv, out
-    raise cm_ncm.NcmError("该歌曲不可播放（版权/地区限制）")
+        for level, result in zip(candidates, results):
+            out = _verify_auto_audio(ncm_id, level, result)
+            if out is None:
+                continue
+            ttl = PLAY_URL_TTL if capability or cached else 7 * 86400
+            cm_db.cache_set(key, json.dumps(level), ttl)
+            if level_ms >= 2000:
+                log.warning("档位探测偏慢 song=%s 取址=%dms 档位=%s", ncm_id, level_ms, level)
+            return level, out
+        raise cm_ncm.NcmError("该歌曲不可播放（版权/地区限制）")
+
+    return _resolve_flight.do(key, select)
 
 
 # ---------- 播放地址解析（v1.28.23 抗卡顿增强） ----------
@@ -917,7 +910,7 @@ class PlaybackMatchError(cm_ncm.NcmError):
 
 def resolve_play_url(ncm_id, level="auto", immerse=None, real_ip=None,
                      max_br=0, refresh=False, alts=False, want_host="", supports_dolby=False,
-                     cn_ip=False):
+                     cn_ip=False, *, supports_vivid=False):
     """官方音源优先；失败后仅下发经过严格音频校验的灰色曲目匹配结果。
 
     ``cn_ip`` 只在**落雪直链**路径启用：官方取址改走上游 randomCNIP（固定国内 IP），
@@ -926,12 +919,16 @@ def resolve_play_url(ncm_id, level="auto", immerse=None, real_ip=None,
     started = time.monotonic()
     ip_key = hashlib.sha256((real_ip or '').encode()).hexdigest()[:16]
     source = os.environ.get('CM_NCM_MATCH_SOURCE', '').strip()
-    supports_dolby = supports_dolby and level == "auto" and not cm_stream.quantize_max_br(max_br)
-    capability = ":dolby" if supports_dolby else ""
+    max_br = cm_stream.quantize_max_br(max_br)
+    spatial_allowed = level == "auto" and not max_br
+    supports_dolby = supports_dolby and spatial_allowed
+    supports_vivid = supports_vivid and spatial_allowed
+    capability = _audio_capability_key(supports_dolby, supports_vivid)
     key = f"smatch:v2:{ncm_id}:{ip_key}:{source}{capability}"
     try:
         return _resolve_official_play_url(ncm_id, level, immerse, real_ip, max_br, refresh, alts, want_host,
-                                          supports_dolby=supports_dolby, cn_ip=cn_ip)
+                                          supports_dolby=supports_dolby, cn_ip=cn_ip,
+                                          supports_vivid=supports_vivid)
     except cm_ncm.NcmError:
         pass
     cached = None if refresh else cm_db.cache_get(key)
@@ -962,8 +959,8 @@ def resolve_play_url(ncm_id, level="auto", immerse=None, real_ip=None,
 
 
 def _resolve_official_play_url(ncm_id, level="auto", immerse=None, real_ip=None,
-                     max_br=0, refresh=False, alts=False, want_host="", supports_dolby=False,
-                     cn_ip=False):
+                               max_br=0, refresh=False, alts=False, want_host="", supports_dolby=False,
+                               cn_ip=False, *, supports_vivid=False):
     """解析播放地址，返回可直接下发的响应 dict。
 
     与旧实现的差别（都是「后端能做、客户端做不到」的事）：
@@ -983,31 +980,21 @@ def _resolve_official_play_url(ncm_id, level="auto", immerse=None, real_ip=None,
     """
     t0 = time.time()
     timing = {}
-    max_br = cm_stream.quantize_max_br(max_br)
     auto = (level == "auto")
-    capability = ":dolby" if supports_dolby else ""
     # 国内 RealIP 模式下地址与边缘对所有落雪用户一致，缓存键用固定标识共享命中。
     ip_ident = "cn" if cn_ip else (real_ip or "")
-    req_key = f"surl_req:{ncm_id}:{level}:{immerse or ''}:{max_br}:{ip_ident}{capability}"
+    if auto:
+        capability = _audio_capability_key(supports_dolby, supports_vivid)
+        rt_key = f"surl:auto:v3:{ncm_id}:{immerse or ''}:{max_br}:{ip_ident}{capability}"
+        req_key = rt_key
+    else:
+        req_key = f"surl_req:{ncm_id}:{level}:{immerse or ''}:{max_br}:{ip_ident}"
+        if level not in VALID_LEVELS:
+            level = "lossless"
+        rt_key = f"surl:v2:{ncm_id}:{level}:{immerse or ''}:0:{ip_ident}"
     cached_err = cm_db.cache_get(f"{req_key}:err")
     if cached_err:
         raise cm_ncm.NcmError(cached_err)
-    probed = None
-    if auto:
-        try:
-            level, probed = best_level(ncm_id, real_ip, max_br, supports_dolby, cn_ip=cn_ip)
-        except cm_ncm.NcmError as e:
-            _remember_url_error(req_key, e)
-            raise
-    elif level not in VALID_LEVELS:
-        level = "lossless"
-    # 只有 auto 受码率上限约束；显式档位是调用方明确要的，不越权改它。
-    eff_br = max_br if auto else 0
-    # v2 discards cached URLs accepted before explicit trial rejection was added.
-    auto_dolby = auto and level == "dolby"
-    rt_key = f"surl:v2:{ncm_id}:{level}:{immerse or ''}:{eff_br}:{ip_ident}"
-    if auto_dolby:
-        rt_key += capability
 
     cached_raw = cm_db.cache_get(rt_key)
     cached = json.loads(cached_raw) if cached_raw else None
@@ -1072,17 +1059,14 @@ def _resolve_official_play_url(ncm_id, level="auto", immerse=None, real_ip=None,
 
     # ---- 常规解析（首次播放 / 缓存过期 / refresh 但没有可用候选线） ----
     try:
-        if probed is not None and not immerse:
-            r = probed                 # 复用档位探测时已经取到的完整结果
+        if auto:
+            level, r = best_level(ncm_id, real_ip, max_br, supports_dolby, cn_ip,
+                                  supports_vivid=supports_vivid, immerse=immerse)
         else:
-            r = cm_ncm.song_url(ncm_id, level, immerse, real_ip=real_ip, timing=timing,
-                                require_exact=auto_dolby, cn_ip=cn_ip)
+            r = cm_ncm.song_url(ncm_id, level, immerse, real_ip=real_ip, timing=timing, cn_ip=cn_ip)
     except cm_ncm.NcmError as e:
-        if auto_dolby:
-            if cached:
-                cm_db.cache_delete(rt_key)
-            return _resolve_official_play_url(ncm_id, "auto", immerse, real_ip, max_br, refresh, alts, want_host,
-                                              cn_ip=cn_ip)
+        if auto and cached:
+            cm_db.cache_delete(rt_key)
         _remember_url_error(req_key, e)
         raise
     out = dict(r)
@@ -1505,8 +1489,10 @@ def _queue_out(item, uid):
 def _resolve_room_stream(handler, ncm_id, level=""):
     real_ip = cm_ncm_gateway.client_ip(handler)
     try:
-        level, probed = (level, None) if level else best_level(ncm_id, real_ip=real_ip)
-        result = probed or cm_ncm.song_url(ncm_id, level, real_ip=real_ip)
+        if level:
+            result = cm_ncm.song_url(ncm_id, level, real_ip=real_ip)
+        else:
+            level, result = best_level(ncm_id, real_ip=real_ip)
         if result.get("url"):
             return {"stream_url": result["url"], "stream_level": result.get("level") or level,
                     "stream_expire_at": cm_rooms.now_ms() + 1_100_000}
@@ -2327,6 +2313,7 @@ def respond_play_url(handler, q, *, cn_ip=False):
             alts=_truthy(q.get("alts")),
             want_host=(q.get("host") or "").strip(),
             supports_dolby=_truthy(q.get("supportsDolby", "0")),
+            supports_vivid=_truthy(q.get("supportsVivid", "0")),
             cn_ip=cn_ip,
         )
     except PlaybackMatchError as e:
@@ -2570,6 +2557,7 @@ def route(handler, method):
             "level": q.get("level"),
             "refresh": q.get("refresh"),
             "supportsDolby": q.get("supportsDolby"),
+            "supportsVivid": q.get("supportsVivid"),
         })
 
     if path == "/badges/powered-by.svg" and method == "GET":
@@ -3311,7 +3299,7 @@ def route(handler, method):
             ("DELETE", "/kugou/account", "Bearer", "解除当前账号的酷狗绑定。"),
             ("GET", "/kugou/media/{ticket}", "播放票据", "短时有效的 HTTPS 媒体地址，支持 HEAD 和单段 Range。"),
             ("GET", "/audio-sources", "Bearer", "自研音源 v1 导入目录，返回音源名称和适用平台。详见 /api-docs/reference/guide-audio-sources-api/"),
-            ("GET", "/audio-sources/currentmusic-engine/resolve", "Bearer", "已导入的流声引擎音源取链，接受 id、level、refresh、supportsDolby；网易云曲库。详见 /api-docs/reference/guide-audio-sources-api/"),
+            ("GET", "/audio-sources/currentmusic-engine/resolve", "Bearer", "已导入的流声引擎音源取链，接受 id、level、refresh、supportsDolby、supportsVivid；网易云曲库。详见 /api-docs/reference/guide-audio-sources-api/"),
             ("GET", "/badges/powered-by.svg", "公开", "流声引擎署名徽章，返回 SVG；lang 可选 zh-CN（默认）或 en。嵌入示例 /api-docs/reference/guide-engine-badge-api/"),
             ("GET", "/lx/source.js", "token 查询参数", "落雪音乐（LX Music）自定义音源脚本。token 为落雪音源专用令牌（clx_ 前缀）或 CurrentMusic 登录会话令牌。wy 源支持 musicUrl，兼容宿主可调用公开的 search 和 lyric 扩展。脚本含令牌，no-store 不缓存。缺少令牌返回 401，失效令牌返回提示脚本。详见 /api-docs/reference/guide-lx-music-source/"),
             ("GET", "/lx/token", "Bearer", "查看本人落雪音源专用令牌状态 `{enabled, createdAt, lastSeen}`（不返回明文；明文只在生成/轮换时返回一次）"),
@@ -3500,7 +3488,7 @@ def route(handler, method):
             ("GET", "/ncmbind/likelist", "Bearer", "绑定账号红心列表 {ids}；refresh=1 强制同步，短期合并已成功写入但上游尚未收敛的红心意图"),
             ("GET", "/daily", "可选登录", "每日推荐"),
             ("GET", "/ncm/search", "公开", "网易云搜索代理，透传 NGINX 提供的用户 RealIP 并按用户 IP 隔离缓存；单曲首屏可含 catalogSongs（公开专辑精确匹配，不计入上游分页）。type=lyric 按歌词搜索（1006），songs 含命中行及前后文 lyric/lyricContext，分页使用 totals.song/hasMore.song；失败通过 lyricContextStatus 明示。详见 /api-docs/reference/guide-search-catalog/ 与 /api-docs/reference/guide-search-lyrics-api/"),
-            ("GET", "/ncm/song/url", "Bearer", "播放地址解析（**仅限注册用户**；自动音质在 supportsDolby=1 且未限制码率时优先选可用的杜比全景声；level / maxBr 码率上限 / refresh 卡顿换线 / alts 候选边缘；透传用户 RealIP；官方取址失败或仅有试听时自动匹配，成功结果 level=matched 并附完整音频校验信息；落雪取链在匹配失败后还会尝试旧版官方取址（level=legacy）；无可用地址返回 502 与 code=playback_match_failed。详见 /api-docs/reference/guide-playback-sources/）"),
+            ("GET", "/ncm/song/url", "Bearer", "播放地址解析（**仅限注册用户**；自动音质按档位优先级选择，支持 supportsVivid 与 supportsDolby 能力声明；level / maxBr 码率上限 / refresh 卡顿换线 / alts 候选边缘；透传用户 RealIP；官方取址失败或仅有试听时自动匹配，成功结果 level=matched 并附完整音频校验信息；落雪取链在匹配失败后还会尝试旧版官方取址（level=legacy）；无可用地址返回 502 与 code=playback_match_failed。详见 /api-docs/reference/guide-playback-sources/）"),
             ("GET", "/ncm/song/detail", "公开", "歌曲详情（ids=逗号分隔，最多 100；分享落地页与客户端使用）"),
             ("GET", "/song/qualities", "公开", "歌曲音质文件资料（含沉浸声变体；不保证可播放）；详见 /api-docs/reference/guide-song-insights-api/"),
             ("GET", "/song/chorus", "公开", "播放器高潮（副歌）区间。按网易云歌曲 id 返回 segments，startMs/endMs 均为毫秒。没有区间时返回空数组。详见 /api-docs/reference/guide-song-insights-api/"),
@@ -5218,7 +5206,7 @@ def route(handler, method):
         """播放地址解析（抗卡顿增强版，见 resolve_play_url）。
 
         参数：``id``（必填）、``level``（默认 auto）、``immerse``（仅 sky）、
-        ``supportsDolby=1``（设备支持杜比，自动最高音质优先尝试杜比）、
+        ``supportsVivid=1``（设备支持臻音全景声）、``supportsDolby=1``（设备支持杜比全景声）、
         ``maxBr``（码率上限，仅 auto 生效）、``refresh=1``（卡顿自愈：换 CDN 线 / 换新签名）、
         ``alts=1``（附带已验证可互换的边缘列表）、``host``（指定边缘，须已验证）。
         """
@@ -5271,7 +5259,8 @@ def route(handler, method):
             "inflight": _resolve_flight.inflight(),
             "policy": {
                 "tiers": list(cm_stream.TIERS),
-                "probeTiers": list(cm_stream.PROBE_TIERS),
+                "probeTiers": list(cm_stream.probe_tiers()),
+                "qualityPriority": list(cm_stream.QUALITY_PRIORITY),
                 "dolbyProbeTiers": list(cm_stream.probe_tiers(supports_dolby=True)),
                 "nominalBr": cm_stream.NOMINAL_BR,
                 "edgeCandidates": list(cm_stream.EDGE_HOSTS),
