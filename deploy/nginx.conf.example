@@ -25,7 +25,7 @@ server {
     # }
 
     location = /cm/profile/banner {
-        client_max_body_size 16m;
+        client_max_body_size 32m;
         proxy_pass http://127.0.0.1:3010/profile/banner;
         proxy_http_version 1.1;
         proxy_set_header Host $host;

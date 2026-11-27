@@ -1,4 +1,4 @@
-"""Validate and normalize public profile banner videos."""
+"""Validate and normalize public profile banner media."""
 import json
 import math
 import re
@@ -14,32 +14,70 @@ VIDEO_TYPES = ("video/mp4", "video/quicktime")
 VIDEO_BYTES = 16 * 1024 ** 2
 VIDEO_SECONDS = 5
 VIDEO_OUTPUT_BYTES = 2 * 1024 ** 2
-_VIDEO_JOBS = threading.BoundedSemaphore(2)
+IMAGE_FORMATS = {"image/jpeg": "JPEG", "image/png": "PNG", "image/webp": "WEBP", "application/octet-stream": ""}
+IMAGE_BYTES = 32 * 1024 ** 2
+IMAGE_OUTPUT_BYTES = 48 * 1024 ** 2
+_MEDIA_JOBS = threading.BoundedSemaphore(2)
 
 
-def upload_video(handler):
+def _upload_length(handler, media, limit):
     length = handler.headers.get("Content-Length", "")
     if (handler.headers.get("Transfer-Encoding") or handler.headers.get("Content-Encoding")
             or not re.fullmatch(r"[0-9]{1,12}", length) or not int(length)):
-        raise MediaError(400, "视频横幅须提供有效的 Content-Length")
-    if int(length) > VIDEO_BYTES:
-        raise MediaError(413, "横幅视频需 ≤16 MiB")
+        raise MediaError(400, f"{media}横幅须提供有效的 Content-Length")
+    if int(length) > limit:
+        raise MediaError(413, f"横幅{media}需 ≤{limit // 1024 ** 2} MiB")
+    return int(length)
+
+
+def upload_lossless_image(handler, content_type, crop):
+    if not re.fullmatch(r"[0-9]{1,8}(?:,[0-9]{1,8}){3}", crop or ""):
+        raise MediaError(400, "请提供裁切区域 crop=x,y,width,height")
+    left, top, width, height = map(int, crop.split(","))
+    if width < 3 or height < 2 or width * 2 != height * 3:
+        raise MediaError(400, "横幅裁切比例须为 3∶2")
+    length = _upload_length(handler, "原图", IMAGE_BYTES)
+    if not _MEDIA_JOBS.acquire(blocking=False):
+        raise MediaError(503, "横幅图片处理繁忙，请稍后重试")
+    try:
+        with tempfile.TemporaryDirectory(prefix="cm-banner-") as directory:
+            work = Path(directory)
+            source, target = work / "source", work / "banner.png"
+            read_upload(handler, source, length)
+            try:
+                process_media(["banner", source, target, IMAGE_FORMATS[content_type], left, top, width, height],
+                              IMAGE_OUTPUT_BYTES, 30, work=work)
+            except MediaError as exc:
+                if exc.status == 413:
+                    raise MediaError(413, "裁切后的无损横幅需 ≤48 MiB") from exc
+                if exc.status == 503:
+                    raise MediaError(503, "横幅图片处理暂不可用，请稍后重试") from exc
+                raise MediaError(400, "横幅图片无效、裁切区域越界或图像超过 2500 万像素") from exc
+            return target.read_bytes()
+    except OSError as exc:
+        raise MediaError(503, "横幅图片处理暂不可用") from exc
+    finally:
+        _MEDIA_JOBS.release()
+
+
+def upload_video(handler):
+    length = _upload_length(handler, "视频", VIDEO_BYTES)
     probe, encoder = shutil.which("ffprobe"), shutil.which("ffmpeg")
     if not probe or not encoder:
         raise MediaError(503, "横幅视频处理暂不可用")
-    if not _VIDEO_JOBS.acquire(blocking=False):
+    if not _MEDIA_JOBS.acquire(blocking=False):
         raise MediaError(503, "横幅视频处理繁忙，请稍后重试")
     try:
         with tempfile.TemporaryDirectory(prefix="cm-banner-") as directory:
             work = Path(directory)
             source, target = work / "source", work / "banner.mp4"
-            read_upload(handler, source, int(length))
+            read_upload(handler, source, length)
             _encode(source, target, probe, encoder)
             return target.read_bytes()
     except OSError as exc:
         raise MediaError(503, "横幅视频处理暂不可用") from exc
     finally:
-        _VIDEO_JOBS.release()
+        _MEDIA_JOBS.release()
 
 
 def _encode(source, target, probe, encoder):

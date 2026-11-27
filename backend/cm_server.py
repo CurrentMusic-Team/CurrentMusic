@@ -1862,15 +1862,15 @@ def _profile_banner_fields(uid, version=None, content_type=None):
     return fields
 
 
-def _serve_profile_banner(handler, banner):
+def _serve_profile_banner(handler, banner, *, head_only=False):
     etag = '"' + banner["version"] + '"'
-    data = banner["image"]
-    size = len(data)
+    data = b"" if head_only else banner["image"]
+    length = size = banner["size"]
     video = banner["content_type"] == "video/mp4"
     status = 200
     if handler.headers.get("If-None-Match") == etag:
         status = 304
-    elif video and handler.headers.get("If-Range", etag) == etag and not getattr(handler, "head_only", False):
+    elif video and not head_only and handler.headers.get("If-Range", etag) == etag:
         match = re.fullmatch(r"bytes=([0-9]{0,20})-([0-9]{0,20})", handler.headers.get("Range", ""))
         if match and any(match.groups()):
             first, last = match.groups()
@@ -1878,6 +1878,7 @@ def _serve_profile_banner(handler, banner):
             end = min(size - 1, int(last)) if first and last else size - 1
             status = 206 if start <= end else 416
             data = data[start:end + 1] if status == 206 else b""
+            length = len(data)
 
     handler.send_response(status)
     handler.send_header("ETag", etag)
@@ -1891,9 +1892,9 @@ def _serve_profile_banner(handler, banner):
         handler.send_header("Content-Range", f"bytes */{size}")
     if status != 304:
         handler.send_header("Content-Type", banner["content_type"])
-        handler.send_header("Content-Length", str(len(data)))
+        handler.send_header("Content-Length", str(length))
     handler.end_headers()
-    if status != 304:
+    if status != 304 and not head_only:
         handler.wfile.write(data)
 
 
@@ -3353,7 +3354,7 @@ def route(handler, method):
             ("POST", "/auth/logout", "Bearer", "退出当前设备并撤销会话"),
             ("GET", "/auth/me", "Bearer", "当前账户资料与统计（含 bannerUrl、累计积分 points 和等级 level，视频横幅另含 bannerType）"),
             ("GET", "/profile", "Bearer", "当前账户资料与统计（bannerUrl 为 API 基址相对路径，空串表示未设置，视频横幅另含 bannerType）"),
-            ("PUT", "/profile/banner", "Bearer", "上传或替换 3∶2 主页横幅：JPEG/PNG/WebP 使用 Base64 JSON；MP4/MOV 使用原始请求体，最长 5 秒、最大 16 MiB。返回 bannerUrl，视频另含 bannerType"),
+            ("PUT", "/profile/banner", "Bearer", "上传或替换 3∶2 主页横幅。普通图片使用 Base64 JSON；站长、超管和管理员可用原图和 crop 参数无损裁切；MP4/MOV 最长 5 秒、最大 16 MiB。返回 bannerUrl，视频另含 bannerType"),
             ("DELETE", "/profile/banner", "Bearer", "移除自己的公开主页横幅，返回空 bannerUrl"),
             ("GET", "/auth/sessions", "Bearer", "在线设备列表 {max:null,sessions}；数量不限，超过 5 台时客户端提示风险"),
             ("DELETE", "/auth/sessions/{id}", "Bearer", "下线指定设备"),
@@ -3481,7 +3482,7 @@ def route(handler, method):
             ("GET", "/chat/live", "公开", "聊天实时流：?sse=1 走 SSE（message/delete/edit 事件，id=seq 断线续传；edit.payload={id,content,atts,streaming}，AI 流式回答用同一 id 反复更新）；不带则返回 JSON 增量"),
             ("POST", "/ai/live", "Bearer", "播放页「问AI」：SSE（start/delta/done/error）流式回答 {question≤500字, song:{type:'song',id,name,sub?,pic?}, reset?:bool}；delta.text 为累计文本；scope=player 与公共 Chat 隔离，reset=true 先清空播放页上下文"),
             ("GET", "/users/{id}/profile", "公开", "公开用户主页（含 user.bannerUrl 和 user.ipRegion，视频横幅另含 user.bannerType）"),
-            ("GET", "/users/{id}/banner", "公开", "读取当前主页横幅 JPEG 或 MP4，v 可指定版本，支持 ETag 验证，MP4 支持单段 Range"),
+            ("GET", "/users/{id}/banner", "公开", "读取当前主页横幅 JPEG、PNG 或 MP4，v 可指定版本，支持 ETag 验证，MP4 支持单段 Range"),
             ("HEAD", "/users/{id}/banner", "公开", "查询当前主页横幅的响应头，v 可指定版本"),
             ("GET", "/posts", "可选登录", "发现动态列表，可按 author 筛选，支持 offset 与 limit"),
             ("POST", "/posts", "Bearer", "发布动态 {title?, content, attachments?}，返回 {id}"),
@@ -4049,7 +4050,15 @@ def route(handler, method):
     if path == "/profile/banner" and method == "PUT":
         u = require_user(handler, allow_query=False)
         upload_type = handler.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
-        if upload_type in cm_profile_banner.VIDEO_TYPES:
+        if upload_type in cm_profile_banner.IMAGE_FORMATS:
+            if role_rank(u) < 0:
+                raise ApiError(403, "无损横幅仅限站长、超管和管理员")
+            try:
+                data = cm_profile_banner.upload_lossless_image(handler, upload_type, q.get("crop"))
+            except cm_feedback_media.MediaError as exc:
+                raise ApiError(exc.status, str(exc)) from exc
+            content_type = "image/png"
+        elif upload_type in cm_profile_banner.VIDEO_TYPES:
             try:
                 data = cm_profile_banner.upload_video(handler)
             except cm_feedback_media.MediaError as exc:
@@ -4062,7 +4071,7 @@ def route(handler, method):
             data = _prepare_profile_banner(body.get("data"))
             content_type = "image/jpeg"
         else:
-            raise ApiError(415, "横幅上传仅支持 JSON 图片、MP4 或 MOV 视频")
+            raise ApiError(415, "横幅上传仅支持 JPEG、PNG、WebP、MP4 或 MOV")
         version = hashlib.sha256(data).hexdigest()[:24]
         cm_db.set_profile_banner(u["id"], version, data, content_type)
         return jresp(handler, 200, _profile_banner_fields(u["id"], version, content_type))
@@ -4074,11 +4083,12 @@ def route(handler, method):
 
     m = re.fullmatch(r"/users/(\d+)/banner", path)
     if m and method in ("GET", "HEAD"):
-        banner = cm_db.get_profile_banner(_community_id(m.group(1)), include_image=True)
-        version = q.get("v")
-        if not banner or (version and version != banner["version"]):
+        head_only = method == "HEAD" or getattr(handler, "head_only", False)
+        banner = cm_db.get_profile_banner(_community_id(m.group(1)), include_image=not head_only,
+                                          version=q.get("v") or "", if_none_match=handler.headers.get("If-None-Match", ""))
+        if not banner:
             raise ApiError(404, "横幅不存在")
-        return _serve_profile_banner(handler, banner)
+        return _serve_profile_banner(handler, banner, head_only=head_only)
 
     # ---- 修改密码：原密码 或 邮箱验证码（v1.28.76）----
     # 已登录用户忘记原密码时，可让服务端把验证码发到**当前账号绑定**的邮箱；

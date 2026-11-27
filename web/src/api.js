@@ -371,6 +371,7 @@ export const api = {
   changePasswordByEmail: (emailCode, newPassword) => call('PUT', '/profile/password', { body: { emailCode, newPassword }, auth: true }),
   uploadAvatarBase64: (b64) => call('PUT', '/profile/avatar', { body: { data: b64 }, auth: true }),
   uploadProfileBanner: (data) => call('PUT', '/profile/banner', { body: { data }, auth: true }),
+  uploadLosslessProfileBanner: (file, crop) => call('PUT', `/profile/banner?crop=${crop.join(',')}`, { file, auth: true, redirect: 'error' }),
   uploadProfileBannerVideo: (file) => call('PUT', '/profile/banner', { file, auth: true, redirect: 'error' }),
   removeProfileBanner: () => call('DELETE', '/profile/banner', { auth: true }),
   profileBannerUrl: (path) => /^\/users\/\d+\/banner\?v=[0-9a-f]{24}$/.test(path) ? settings.base + path : '',

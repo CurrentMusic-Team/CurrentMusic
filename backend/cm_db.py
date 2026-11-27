@@ -2186,13 +2186,18 @@ def set_profile_banner(uid, version="", image=None, content_type="image/jpeg"):
         conn.close()
 
 
-def get_profile_banner(uid, *, include_image=False):
+def get_profile_banner(uid, *, include_image=False, version="", if_none_match=""):
     conn = connect()
     try:
-        columns = "b.version, b.content_type, b.image" if include_image else "b.version, b.content_type"
+        columns = "b.version, b.content_type, length(b.image) AS size"
+        args = (uid, version, version)
+        if include_image:
+            columns += """, CASE WHEN ? = ('"' || b.version || '"') THEN NULL ELSE b.image END AS image"""
+            args = (if_none_match, *args)
         return conn.execute(
             f"""SELECT {columns} FROM profile_banners b JOIN users u ON u.id=b.user_id
-                WHERE b.user_id=? AND u.disabled=0 AND u.username!='__internal__'""", (uid,)
+                WHERE b.user_id=? AND u.disabled=0 AND u.username!='__internal__'
+                  AND (?='' OR b.version=?)""", args
         ).fetchone()
     finally:
         conn.close()
