@@ -41,7 +41,7 @@ function readImage(file) {
   });
 }
 
-export function bindProfileBanner(container) {
+export function bindProfileBanner(container, lossless = false) {
   const banner = container.querySelector('.cm-profile-banner');
   const input = banner.querySelector('input');
   const select = banner.querySelector('[data-banner="select"]');
@@ -59,7 +59,7 @@ export function bindProfileBanner(container) {
   function update(result) {
     if (!isCurrent()) return;
     banner.outerHTML = profileBannerHTML(result, true);
-    bindProfileBanner(container);
+    bindProfileBanner(container, lossless);
   }
 
   select.onclick = () => input.click();
@@ -80,7 +80,7 @@ export function bindProfileBanner(container) {
         <div class="cm-profile-banner cm-profile-banner-custom">${type ? '<video muted loop playsinline controls></video>'
           : '<canvas tabindex="0" aria-label="3 比 2 横幅裁切预览，可拖动或使用方向键取景"></canvas>'}</div>
         ${type ? '<p>视频会居中裁剪为 3∶2，最长 5 秒，发布后公开静音循环播放。</p>' : `
-          <p>拖动图片调整取景，保存后会公开展示。</p>
+          <p>拖动图片调整取景，保存后会公开展示。${lossless ? '无损保存会保留裁切后的像素尺寸。' : ''}</p>
           <div class="cm-banner-crop-controls">
             <label>缩放 <input type="range" min="1" max="3" step=".01" value="1" data-crop-zoom disabled></label>
             <button type="button" data-crop-reset disabled>重置</button>
@@ -100,10 +100,10 @@ export function bindProfileBanner(container) {
       status.textContent = message;
       status.hidden = false;
     }
-    let exportCrop;
+    let crop;
     media.onload = () => {
       try {
-        exportCrop = bindBannerCrop(dialog, media);
+        crop = bindBannerCrop(dialog, media, !!lossless);
         save.disabled = false;
       } catch (e) { showStatus(e.message); }
     };
@@ -124,11 +124,17 @@ export function bindProfileBanner(container) {
       setBusy(true);
       save.loading = true;
       try {
-        const imageData = type ? '' : (await readImage(await exportCrop(MAX_IMAGE_UPLOAD_BYTES))).split(',')[1];
-        if (!isCurrent()) return;
-        const result = type
-          ? await api.uploadProfileBannerVideo(file.slice(0, file.size, type))
-          : await api.uploadProfileBanner(imageData);
+        let result;
+        if (type) {
+          result = await api.uploadProfileBannerVideo(file.slice(0, file.size, type));
+        } else if (lossless) {
+          const original = file.type ? file : file.slice(0, file.size, 'application/octet-stream');
+          result = await api.uploadLosslessProfileBanner(original, crop.cropBox());
+        } else {
+          const imageData = (await readImage(await crop.exportCrop(MAX_IMAGE_UPLOAD_BYTES))).split(',')[1];
+          if (!isCurrent()) return;
+          result = await api.uploadProfileBanner(imageData);
+        }
         dialog.open = false;
         update(result);
         toast('横幅已更新');

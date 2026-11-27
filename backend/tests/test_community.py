@@ -174,6 +174,59 @@ class TestCommunity(unittest.TestCase):
             cm_server.jresp(handler, exc.code, {"error": exc.msg})
         return handler
 
+    def test_lossless_image_banner_preserves_pixels_and_requires_role(self):
+        try:
+            from PIL import Image, ImageDraw, ImageOps
+        except ImportError:
+            self.skipTest("Pillow unavailable")
+
+        image = Image.new("RGBA", (1250, 1850), (12, 202, 148, 133))
+        ImageDraw.Draw(image).rectangle((150, 80, 900, 420), fill=(230, 87, 151, 255))
+        image.getexif()[274] = 6
+        image.getexif()[270] = "fixture metadata"
+        original = io.BytesIO()
+        image.save(original, "PNG", exif=image.getexif())
+        source = original.getvalue()
+        crop = (20, 30, 1820, 1230)
+        expected = ImageOps.exif_transpose(image).crop(crop).tobytes()
+        upload = "/profile/banner?crop=20,30,1800,1200"
+        headers = {"Content-Type": "image/png"}
+
+        _, ordinary = self.user("ordinary-banner-uploader")
+        self.assertEqual(self.banner_request("PUT", upload, data=source, headers=headers).status, 401)
+        self.assertEqual(self.banner_request("PUT", upload, token=ordinary, data=source, headers=headers).status, 403)
+
+        for role, grant in (("owner", cm_db.set_owner), ("super", cm_db.set_super), ("admin", cm_db.set_admin)):
+            with self.subTest(role=role):
+                uid, token = self.user("lossless-banner-" + role)
+                grant(uid)
+                saved = self.banner_request("PUT", upload, token=token, data=source, headers=headers)
+                self.assertEqual(saved.status, 200, saved.wfile.getvalue())
+                result = json.loads(saved.wfile.getvalue())
+                self.assertNotIn("bannerType", result)
+                path = result["bannerUrl"]
+                response = self.banner_request("GET", path)
+                self.assertEqual(response.response_headers["Content-Type"], "image/png")
+                with Image.open(io.BytesIO(response.wfile.getvalue())) as banner:
+                    self.assertEqual(banner.size, (1800, 1200))
+                    self.assertEqual(banner.tobytes(), expected)
+                    self.assertFalse(banner.getexif())
+                head = self.banner_request("HEAD", path)
+                self.assertEqual(head.response_headers["Content-Length"], response.response_headers["Content-Length"])
+                self.assertEqual(head.wfile.getvalue(), b"")
+                etag = response.response_headers["ETag"]
+                cached = self.banner_request("GET", path, headers={"If-None-Match": etag})
+                self.assertEqual(cached.status, 304)
+                self.assertEqual(cached.wfile.getvalue(), b"")
+
+        invalid_crop = "/profile/banner?crop=1500,700,1800,1200"
+        self.assertEqual(self.banner_request("PUT", invalid_crop, token=token, data=source, headers=headers).status, 400)
+        oversized = {**headers, "Content-Length": str(cm_profile_banner.IMAGE_BYTES + 1)}
+        self.assertEqual(self.banner_request("PUT", upload, token=token, data=b"", headers=oversized).status, 413)
+        cm_db.set_admin(uid, False)
+        self.assertEqual(self.banner_request("PUT", upload, token=token, data=source, headers=headers).status, 403)
+        self.assertEqual(self.banner_request("GET", path).status, 200)
+
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg unavailable")
     def test_video_banner_normalization_range_and_validation(self):
         uid, token = self.user("video-banner-owner")
