@@ -72,6 +72,7 @@ export function bindBannerCrop(dialog, image) {
     const toJpeg = quality => new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
     let cropped = await toJpeg(.9);
     if (cropped?.size > limit) cropped = await toJpeg(.78);
+    if (cropped?.size > limit) cropped = await toJpeg(.65);
     if (!cropped) throw new Error('无法生成裁切后的图片');
     if (cropped.size > limit) throw new Error('裁切后的图片需 ≤1 MiB');
     return cropped;

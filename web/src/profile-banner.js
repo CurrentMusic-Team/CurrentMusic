@@ -3,7 +3,8 @@ import { api, auth, settings } from './api.js';
 import { confirmDialog, esc, toast } from './ui.js';
 import { bindBannerCrop } from './profile-banner-crop.js';
 
-const MAX_IMAGE_BYTES = 1024 * 1024;
+const MAX_SOURCE_IMAGE_BYTES = 32 * 1024 * 1024;
+const MAX_IMAGE_UPLOAD_BYTES = 1024 * 1024;
 const MAX_VIDEO_BYTES = 16 * 1024 * 1024;
 
 function videoType(file) {
@@ -68,7 +69,7 @@ export function bindProfileBanner(container) {
     if (!file || busy || !isCurrent()) return;
     const type = videoType(file);
     if (type && file.size > MAX_VIDEO_BYTES) return toast('横幅视频需 ≤16 MiB');
-    if (!type && file.size > MAX_IMAGE_BYTES) return toast('横幅图片需 ≤1 MiB');
+    if (!type && file.size > MAX_SOURCE_IMAGE_BYTES) return toast('横幅原图需 ≤32 MiB');
     if (!type && file.type && !/^image\/(jpeg|png|webp)$/.test(file.type)) {
       return toast('请选择 JPEG、PNG、WebP 图片或 MP4、MOV 视频');
     }
@@ -123,7 +124,7 @@ export function bindProfileBanner(container) {
       setBusy(true);
       save.loading = true;
       try {
-        const imageData = type ? '' : (await readImage(await exportCrop(MAX_IMAGE_BYTES))).split(',')[1];
+        const imageData = type ? '' : (await readImage(await exportCrop(MAX_IMAGE_UPLOAD_BYTES))).split(',')[1];
         if (!isCurrent()) return;
         const result = type
           ? await api.uploadProfileBannerVideo(file.slice(0, file.size, type))
