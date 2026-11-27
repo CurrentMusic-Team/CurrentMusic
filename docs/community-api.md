@@ -13,7 +13,7 @@
 | GET | `/cm/users/{id}/banner` | 公开读取当前横幅，返回 `image/jpeg` 或 `video/mp4`。可用 `v` 指定版本，并使用 ETag 验证。视频支持单段字节范围请求 |
 | HEAD | `/cm/users/{id}/banner` | 查询当前横幅的响应头，包括 `Content-Type`、`Content-Length` 和 `ETag`。可用 `v` 指定版本 |
 
-- 图片接受 JPEG、PNG、WebP，解码后最多 1 MiB、2500 万像素。服务端按 EXIF 校正方向，居中裁剪为 3∶2 并转成 JPEG，最长边最多 1600 像素。Web 上传时可拖动和缩放调整取景，再提交已裁好的 3∶2 图片。旧图片仍可读取。
+- 图片接受 JPEG、PNG、WebP，Base64 解码后的文件最多 1 MiB、2500 万像素。服务端按 EXIF 校正方向，居中裁剪为 3∶2 并转成 JPEG，最长边最多 1600 像素。Web 裁切器可选择最大 32 MiB、2500 万像素的原图，可拖动和缩放调整取景，再将裁好的 3∶2 图片压缩到 1 MiB 内提交。旧图片仍可读取。
 - 视频使用 `Content-Type: video/mp4` 或 `video/quicktime` 并提供 `Content-Length`。文件最多 16 MiB，视频轨最长 5 秒，最长边最多 3840 像素，总像素数最多 8,294,400。服务端校正旋转方向并居中裁剪，输出 720×480 的无声 H.264 MP4。Web 静音循环播放。
 
 上传 MP4 示例。请先将自己的 CurrentMusic 会话令牌存入环境变量 `CURRENTMUSIC_TOKEN`。
