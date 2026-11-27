@@ -1,12 +1,10 @@
 // 公开用户主页：资料 + 统计（点赞/歌单/听歌天数/累计时长）+ 当前在听 + 最近听过 + TA 的歌单
 import { api, auth } from '../api.js';
 import { mountProfileSocial } from './social.js';
-import { esc, avatarHTML, fmtListen, userTags, skelProfile } from '../ui.js';
+import { esc, skelProfile } from '../ui.js';
 import { player } from '../player.js';
 import { mountPosts } from '../posts.js';
-import { profileBannerHTML } from '../profile-banner.js';
-
-const fmtTime = ts => new Date(ts * 1000).toLocaleDateString('zh-CN');
+import { profileCardHTML } from '../profile-card.js';
 
 export async function render(el, params) {
   const uid = params[0];
@@ -30,29 +28,12 @@ export async function render(el, params) {
     </div>`;
 
   el.innerHTML = `
-    <div class="cm-community-profile">
-      ${profileBannerHTML(u)}
-      <div class="cm-up-head">
-        <div class="cm-up-ava">${avatarHTML(u, 76)}</div>
-        <div class="cm-up-info">
-          <h2>${esc(u.nickname)}${userTags(u)}</h2>
-          ${u.bio ? `<div class="cm-up-bio">${esc(u.bio)}</div>` : ''}
-          <div class="cm-up-sub">注册于 ${fmtTime(u.created_at)}${u.ipRegion ? ` · <span class="cm-uregion" title="IP 属地"><span class="material-icons-outlined">location_on</span>IP 属地 ${esc(u.ipRegion)}</span>` : ''}</div>
-          <div class="cm-social-actions" data-profile-social></div>
-        </div>
-      </div>
-    </div>
+    ${profileCardHTML(u, st)}
     <nav class="cm-profile-tabs" aria-label="个人主页">
       <a href="#/u/${uid}" ${showPosts ? '' : 'aria-current="page"'}>音乐</a>
       <a href="#/u/${uid}?tab=posts" ${showPosts ? 'aria-current="page"' : ''}>帖子</a>
     </nav>
     ${showPosts ? '<div class="cm-profile-posts"></div>' : `
-    <div class="cm-up-stats">
-      <div><b>${st.likes}</b><span>点赞</span></div>
-      <div><b>${st.playlists}</b><span>歌单</span></div>
-      <div><b>${st.playDays}</b><span>听歌天数</span></div>
-      <div><b>${fmtListen(st.listenMs)}</b><span>累计时长</span></div>
-    </div>
     ${d.current ? `
     <div class="cm-sec-head"><h2>当前在听</h2></div>
     <div class="cm-up-now">

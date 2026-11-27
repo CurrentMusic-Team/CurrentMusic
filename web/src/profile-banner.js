@@ -1,6 +1,7 @@
 import { mdui } from './md.js';
 import { api, auth, settings } from './api.js';
 import { confirmDialog, esc, toast } from './ui.js';
+import { bindBannerCrop } from './profile-banner-crop.js';
 
 const MAX_IMAGE_BYTES = 1024 * 1024;
 const MAX_VIDEO_BYTES = 16 * 1024 * 1024;
@@ -73,10 +74,16 @@ export function bindProfileBanner(container) {
     }
 
     const dialog = mdui.dialog({
-      headline: '预览主页横幅',
+      headline: type ? '预览主页横幅' : '裁切主页横幅',
       body: `<div class="cm-banner-preview">
-        <div class="cm-profile-banner cm-profile-banner-custom">${type ? '<video muted loop playsinline controls></video>' : '<img alt="">'}</div>
-        <p>横幅会公开展示，并居中裁剪为 3∶2。${type ? '视频最长 5 秒，发布后静音循环播放。' : ''}</p>
+        <div class="cm-profile-banner cm-profile-banner-custom">${type ? '<video muted loop playsinline controls></video>'
+          : '<canvas tabindex="0" aria-label="3 比 2 横幅裁切预览，可拖动或使用方向键取景"></canvas>'}</div>
+        ${type ? '<p>视频会居中裁剪为 3∶2，最长 5 秒，发布后公开静音循环播放。</p>' : `
+          <p>拖动图片调整取景，保存后会公开展示。</p>
+          <div class="cm-banner-crop-controls">
+            <label>缩放 <input type="range" min="1" max="3" step=".01" value="1" data-crop-zoom disabled></label>
+            <button type="button" data-crop-reset disabled>重置</button>
+          </div>`}
         <p data-preview-status role="status" hidden></p>
         <div class="cm-banner-preview-actions">
           <mdui-button variant="text" data-cancel>取消</mdui-button>
@@ -85,14 +92,20 @@ export function bindProfileBanner(container) {
       </div>`,
     });
     const save = dialog.querySelector('[data-save]');
-    const media = dialog.querySelector(type ? 'video' : 'img');
+    const media = type ? dialog.querySelector('video') : new Image();
     const status = dialog.querySelector('[data-preview-status]');
     const previewUrl = URL.createObjectURL(file);
     function showStatus(message) {
       status.textContent = message;
       status.hidden = false;
     }
-    media.onload = () => { save.disabled = false; };
+    let exportCrop;
+    media.onload = () => {
+      try {
+        exportCrop = bindBannerCrop(dialog, media);
+        save.disabled = false;
+      } catch (e) { showStatus(e.message); }
+    };
     media.onloadedmetadata = () => {
       if (media.duration > 5.05) showStatus('横幅视频最长 5 秒，请选择更短的视频。');
       else save.disabled = false;
@@ -110,7 +123,7 @@ export function bindProfileBanner(container) {
       setBusy(true);
       save.loading = true;
       try {
-        const imageData = type ? '' : (await readImage(file)).split(',')[1];
+        const imageData = type ? '' : (await readImage(await exportCrop(MAX_IMAGE_BYTES))).split(',')[1];
         if (!isCurrent()) return;
         const result = type
           ? await api.uploadProfileBannerVideo(file.slice(0, file.size, type))

@@ -10,10 +10,26 @@
 | --- | --- | --- |
 | PUT | `/cm/profile/banner` | 上传或替换横幅。图片使用 JSON `{"data":"BASE64_IMAGE"}`，视频使用原始 MP4 或 MOV 文件。返回 `bannerUrl`，视频另返回 `bannerType` |
 | DELETE | `/cm/profile/banner` | 清除当前账号的横幅。重复删除仍返回 `{"bannerUrl":""}` |
-| GET、HEAD | `/cm/users/{id}/banner` | 公开读取当前横幅，返回 `image/jpeg` 或 `video/mp4`。可用 `v` 指定版本，并使用 ETag 验证。视频支持单段字节范围请求 |
+| GET | `/cm/users/{id}/banner` | 公开读取当前横幅，返回 `image/jpeg` 或 `video/mp4`。可用 `v` 指定版本，并使用 ETag 验证。视频支持单段字节范围请求 |
+| HEAD | `/cm/users/{id}/banner` | 查询当前横幅的响应头，包括 `Content-Type`、`Content-Length` 和 `ETag`。可用 `v` 指定版本 |
 
-- 图片接受 JPEG、PNG、WebP，解码后最多 1 MiB、2500 万像素。服务端按 EXIF 校正方向，居中裁剪为 3∶2 并转成 JPEG，最长边最多 1600 像素。旧图片仍可读取，Web 以 3∶2 居中展示。
+- 图片接受 JPEG、PNG、WebP，解码后最多 1 MiB、2500 万像素。服务端按 EXIF 校正方向，居中裁剪为 3∶2 并转成 JPEG，最长边最多 1600 像素。Web 上传时可拖动和缩放调整取景，再提交已裁好的 3∶2 图片。旧图片仍可读取。
 - 视频使用 `Content-Type: video/mp4` 或 `video/quicktime` 并提供 `Content-Length`。文件最多 16 MiB，视频轨最长 5 秒，最长边最多 3840 像素，总像素数最多 8,294,400。服务端校正旋转方向并居中裁剪，输出 720×480 的无声 H.264 MP4。Web 静音循环播放。
+
+上传 MP4 示例。请先将自己的 CurrentMusic 会话令牌存入环境变量 `CURRENTMUSIC_TOKEN`。
+
+```bash
+curl --request PUT 'https://music.20110208.xyz/cm/profile/banner' \
+  --header "Authorization: Bearer ${CURRENTMUSIC_TOKEN}" \
+  --header 'Content-Type: video/mp4' \
+  --data-binary '@banner.mp4'
+```
+
+```json
+{"bannerUrl":"/users/42/banner?v=0123456789abcdef01234567","bannerType":"video"}
+```
+
+读取时可用 `If-None-Match` 发送上次取得的 `ETag`，版本相同时返回 `304`。视频请求可使用单段 `Range`（如 `bytes=0-1023`），范围可满足时返回 `206` 和 `Content-Range`，超出文件范围时返回 `416`。
 
 不符合格式、时长或尺寸限制的文件返回 400。请求媒体类型不受支持时返回 415，视频超过大小限制时返回 413，媒体处理组件不可用时返回 503。读取缺失、已移除或已替换的版本返回 404。用户横幅会公开展示。
 

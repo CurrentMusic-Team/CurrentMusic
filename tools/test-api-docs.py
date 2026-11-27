@@ -48,7 +48,7 @@ class DocumentationTests(unittest.TestCase):
         fields=docs.params(found['POST','/playlists/{id}/tracks'])
         self.assertIn(('JSON body','songs'),fields)
         for method, path in [('PUT', '/profile/banner'), ('DELETE', '/profile/banner'),
-                             ('GET', '/users/{id}/banner'), ('GET', '/posts/{id}')]:
+                             ('GET', '/users/{id}/banner'), ('HEAD', '/users/{id}/banner'), ('GET', '/posts/{id}')]:
             self.assertIn((method, path), found)
         self.assertIn(('JSON body', 'title'), docs.params(found['POST', '/posts']))
         self.assertIn(('query', 'after'), docs.params(found['GET', '/posts/{id}/comments']))
@@ -86,6 +86,10 @@ class DocumentationTests(unittest.TestCase):
                 ("POST", "/cm/kugou/account/code"), ("POST", "/cm/kugou/account/verify"),
             })
             self.assertTrue((output/'guide-community-api.md').is_file())
+            banner_operations = {(item['method'], item['path']) for item in manifest
+                                 if item['path'] in ('/cm/profile/banner', '/cm/users/{id}/banner')}
+            self.assertEqual(banner_operations, {('PUT', '/cm/profile/banner'), ('DELETE', '/cm/profile/banner'),
+                                                 ('GET', '/cm/users/{id}/banner'), ('HEAD', '/cm/users/{id}/banner')})
             self.assertIn('(guide-community-api.md)', (output/'_sidebar.md').read_text())
             self.assertIn('(guide-donations-api.md)', (output/'_sidebar.md').read_text())
             self.assertIn('/cm/donation/qr/{recipientId}/{paymentMethod}', (output/'endpoints.md').read_text())
