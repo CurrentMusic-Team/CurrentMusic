@@ -3351,9 +3351,9 @@ def route(handler, method):
             ("POST", "/auth/2fa/login", "公开", "{challengeToken, code}：完成第二步登录，返回 {token, user}；5 分钟有效，失败每账号 5 次/5 分钟"),
             ("POST", "/auth/login", "公开", "用户名或绑定手机号登录；同一账户 15 分钟内最多 5 次密码失败，之后返回 429 和 Retry-After。开启 2FA 或密保时先返回验证挑战（requires2FA 或 requiresSecurityQuestion、challengeToken、expiresIn）"),
             ("POST", "/auth/logout", "Bearer", "退出当前设备并撤销会话"),
-            ("GET", "/auth/me", "Bearer", "当前账户资料与统计（含 bannerUrl、累计积分 points 和等级 level）"),
-            ("GET", "/profile", "Bearer", "当前账户资料与统计（bannerUrl 为 API 基址相对路径，空串表示未设置）"),
-            ("PUT", "/profile/banner", "Bearer", "上传或替换公开主页横幅（3∶2 图片或最长 5 秒的视频），返回 bannerUrl"),
+            ("GET", "/auth/me", "Bearer", "当前账户资料与统计（含 bannerUrl、累计积分 points 和等级 level，视频横幅另含 bannerType）"),
+            ("GET", "/profile", "Bearer", "当前账户资料与统计（bannerUrl 为 API 基址相对路径，空串表示未设置，视频横幅另含 bannerType）"),
+            ("PUT", "/profile/banner", "Bearer", "上传或替换 3∶2 主页横幅：JPEG/PNG/WebP 使用 Base64 JSON；MP4/MOV 使用原始请求体，最长 5 秒、最大 16 MiB。返回 bannerUrl，视频另含 bannerType"),
             ("DELETE", "/profile/banner", "Bearer", "移除自己的公开主页横幅，返回空 bannerUrl"),
             ("GET", "/auth/sessions", "Bearer", "在线设备列表 {max:null,sessions}；数量不限，超过 5 台时客户端提示风险"),
             ("DELETE", "/auth/sessions/{id}", "Bearer", "下线指定设备"),
@@ -3480,8 +3480,9 @@ def route(handler, method):
             ("GET", "/chat/members", "公开", "聊天成员：?q= 实时搜索公开昵称（@ 提及使用用户 ID；无 q 返回近期活跃；尊重广场公开开关，AI 账号始终可搜到）"),
             ("GET", "/chat/live", "公开", "聊天实时流：?sse=1 走 SSE（message/delete/edit 事件，id=seq 断线续传；edit.payload={id,content,atts,streaming}，AI 流式回答用同一 id 反复更新）；不带则返回 JSON 增量"),
             ("POST", "/ai/live", "Bearer", "播放页「问AI」：SSE（start/delta/done/error）流式回答 {question≤500字, song:{type:'song',id,name,sub?,pic?}, reset?:bool}；delta.text 为累计文本；scope=player 与公共 Chat 隔离，reset=true 先清空播放页上下文"),
-            ("GET", "/users/{id}/profile", "公开", "公开用户主页（含 user.bannerUrl 和 user.ipRegion）"),
-            ("GET", "/users/{id}/banner", "公开", "读取当前主页横幅 JPEG 或 MP4，v 可指定版本"),
+            ("GET", "/users/{id}/profile", "公开", "公开用户主页（含 user.bannerUrl 和 user.ipRegion，视频横幅另含 user.bannerType）"),
+            ("GET", "/users/{id}/banner", "公开", "读取当前主页横幅 JPEG 或 MP4，v 可指定版本，支持 ETag 验证，MP4 支持单段 Range"),
+            ("HEAD", "/users/{id}/banner", "公开", "查询当前主页横幅的响应头，v 可指定版本"),
             ("GET", "/posts", "可选登录", "发现动态列表，可按 author 筛选，支持 offset 与 limit"),
             ("POST", "/posts", "Bearer", "发布动态 {title?, content, attachments?}，返回 {id}"),
             ("GET", "/posts/{id}", "可选登录", "单条帖子详情，返回与列表一致的帖子结构"),
@@ -4072,7 +4073,7 @@ def route(handler, method):
         return jresp(handler, 200, {"bannerUrl": ""})
 
     m = re.fullmatch(r"/users/(\d+)/banner", path)
-    if m and method == "GET":
+    if m and method in ("GET", "HEAD"):
         banner = cm_db.get_profile_banner(_community_id(m.group(1)), include_image=True)
         version = q.get("v")
         if not banner or (version and version != banner["version"]):

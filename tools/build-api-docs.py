@@ -283,7 +283,7 @@ def endpoint_text(method, path, node, title, access=None):
     query = [(key, '<' + key + '>') for (where, key) in params(node) if where == 'query']
     if query:
         url += '?' + '&'.join(k+'='+v for k,v in query)
-    cmd = f"curl --request {method} '{url}'"
+    cmd = f"curl --head '{url}'" if method == 'HEAD' else f"curl --request {method} '{url}'"
     if 'Bearer' in permission or '登录' in permission or '管理员' in permission:
         cmd += " \\\n  --header 'Authorization: Bearer YOUR_CURRENTMUSIC_TOKEN'"
     body = {key: '<' + key + '>' for (where, key) in params(node) if where == 'JSON body'}
