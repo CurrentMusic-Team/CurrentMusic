@@ -13,6 +13,7 @@ from cm_feedback_media import MOV_INPUT_ARGS, MediaError, process_media, read_up
 VIDEO_TYPES = ("video/mp4", "video/quicktime")
 VIDEO_BYTES = 16 * 1024 ** 2
 VIDEO_SECONDS = 5
+EXTENDED_VIDEO_SECONDS = 10
 VIDEO_OUTPUT_BYTES = 2 * 1024 ** 2
 IMAGE_FORMATS = {"image/jpeg": "JPEG", "image/png": "PNG", "image/webp": "WEBP", "application/octet-stream": ""}
 IMAGE_BYTES = 32 * 1024 ** 2
@@ -60,8 +61,9 @@ def upload_lossless_image(handler, content_type, crop):
         _MEDIA_JOBS.release()
 
 
-def upload_video(handler):
+def upload_video(handler, *, extended=False):
     length = _upload_length(handler, "视频", VIDEO_BYTES)
+    max_seconds = EXTENDED_VIDEO_SECONDS if extended else VIDEO_SECONDS
     probe, encoder = shutil.which("ffprobe"), shutil.which("ffmpeg")
     if not probe or not encoder:
         raise MediaError(503, "横幅视频处理暂不可用")
@@ -72,7 +74,7 @@ def upload_video(handler):
             work = Path(directory)
             source, target = work / "source", work / "banner.mp4"
             read_upload(handler, source, length)
-            _encode(source, target, probe, encoder)
+            _encode(source, target, probe, encoder, max_seconds)
             return target.read_bytes()
     except OSError as exc:
         raise MediaError(503, "横幅视频处理暂不可用") from exc
@@ -80,7 +82,7 @@ def upload_video(handler):
         _MEDIA_JOBS.release()
 
 
-def _encode(source, target, probe, encoder):
+def _encode(source, target, probe, encoder, max_seconds):
     with source.open("rb") as handle:
         if handle.read(8)[4:] != b"ftyp":
             raise MediaError(400, "横幅视频须为 MP4 或 MOV 文件")
@@ -98,17 +100,18 @@ def _encode(source, target, probe, encoder):
             raise MediaError(400, "无法读取横幅视频的尺寸或时长") from exc
     if min(width, height) < 2 or max(width, height) > 3840 or width * height > 3840 * 2160:
         raise MediaError(400, "横幅视频最长边需 ≤3840 像素，总像素数需 ≤830 万")
-    if not math.isfinite(duration) or not 0 < duration <= VIDEO_SECONDS:
-        raise MediaError(400, "横幅视频最长 5 秒")
+    if not math.isfinite(duration) or not 0 < duration <= max_seconds:
+        raise MediaError(400, f"横幅视频最长 {max_seconds} 秒")
 
+    output_limit = VIDEO_OUTPUT_BYTES * max_seconds // VIDEO_SECONDS
     filters = "crop=w='min(iw,ih*3/2/sar)':h='min(ih,iw*sar*2/3)',scale=720:480,setsar=1,fps=24"
     _run([encoder, "-nostdin", "-v", "error", "-xerror", "-err_detect", "explode",
           "-abort_on", "empty_output", *MOV_INPUT_ARGS, "-threads", "1", "-i", source,
           "-map", f"0:{video['index']}", "-an", "-sn", "-dn", "-map_metadata", "-1",
-          "-map_metadata:s", "-1", "-map_chapters", "-1", "-t", str(VIDEO_SECONDS),
+          "-map_metadata:s", "-1", "-map_chapters", "-1", "-t", str(max_seconds),
           "-filter_threads", "1", "-vf", filters, "-threads", "1", "-c:v", "libx264",
           "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23", "-maxrate", "2M",
-          "-bufsize", "2M", "-movflags", "+faststart", target], VIDEO_OUTPUT_BYTES, 20, source.parent)
+          "-bufsize", "2M", "-movflags", "+faststart", target], output_limit, max_seconds * 4, source.parent)
 
 
 def _run(args, size, timeout, work, stdout=subprocess.DEVNULL):
@@ -118,5 +121,5 @@ def _run(args, size, timeout, work, stdout=subprocess.DEVNULL):
         if exc.status == 503:
             raise MediaError(503, "横幅视频处理暂不可用，请稍后重试") from exc
         if exc.status == 413:
-            raise MediaError(413, "处理后的横幅视频超过 2 MiB") from exc
+            raise MediaError(413, "处理后的横幅视频超过大小限制") from exc
         raise MediaError(400, "横幅视频无法处理，请选择有效的 MP4 或 MOV 文件") from exc

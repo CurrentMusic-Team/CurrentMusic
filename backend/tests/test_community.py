@@ -227,20 +227,19 @@ class TestCommunity(unittest.TestCase):
         self.assertEqual(self.banner_request("PUT", upload, token=token, data=source, headers=headers).status, 403)
         self.assertEqual(self.banner_request("GET", path).status, 200)
 
+    def make_banner_clip(self, seconds):
+        source = Path(self.tmp.name) / f"source-{seconds}.mov"
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=120x200:rate=24",
+                        "-f", "lavfi", "-i", "sine=frequency=440", "-t", str(seconds),
+                        "-c:v", "libx264", "-threads", "1", "-c:a", "aac", str(source)], check=True)
+        return source.read_bytes()
+
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg unavailable")
     def test_video_banner_normalization_range_and_validation(self):
         uid, token = self.user("video-banner-owner")
         profile = f"/users/{uid}/profile"
         upload = "/profile/banner"
-
-        def make_clip(seconds):
-            source = Path(self.tmp.name) / f"source-{seconds}.mov"
-            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=120x200:rate=24",
-                            "-f", "lavfi", "-i", "sine=frequency=440", "-t", str(seconds),
-                            "-c:v", "libx264", "-threads", "1", "-c:a", "aac", str(source)], check=True)
-            return source.read_bytes()
-
-        source = make_clip(5)
+        source = self.make_banner_clip(5)
         self.assertEqual(self.banner_request("PUT", upload, data=source).status, 401)
         saved = self.banner_request("PUT", upload, token=token, data=source, headers={"Content-Type": "video/quicktime"})
         self.assertEqual(saved.status, 200, saved.wfile.getvalue())
@@ -272,7 +271,7 @@ class TestCommunity(unittest.TestCase):
         self.assertEqual(self.banner_request("GET", path, headers={"Range": f"bytes={len(data)}-"}).status, 416)
         self.assertEqual(self.banner_request("GET", path, headers={"If-None-Match": full.response_headers["ETag"]}).status, 304)
 
-        for invalid in (b"not video", make_clip(5.25)):
+        for invalid in (b"not video", self.make_banner_clip(5.25)):
             self.assertEqual(self.banner_request("PUT", upload, token=token, data=invalid).status, 400)
         oversized = {"Content-Length": str(cm_profile_banner.VIDEO_BYTES + 1)}
         self.assertEqual(self.banner_request("PUT", upload, token=token, data=b"", headers=oversized).status, 413)
@@ -280,3 +279,33 @@ class TestCommunity(unittest.TestCase):
 
         self.assertEqual(self.call("DELETE", upload, token=token), (200, {"bannerUrl": ""}))
         self.assertEqual(self.call("GET", path)[0], 404)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg unavailable")
+    def test_video_banner_duration_by_role(self):
+        upload = "/profile/banner"
+        ten_seconds = self.make_banner_clip(10)
+        over_limit = self.make_banner_clip(10.25)
+        _, ordinary = self.user("ordinary-video-banner")
+        denied = self.banner_request("PUT", upload, token=ordinary, data=ten_seconds)
+        self.assertEqual(denied.status, 400)
+        self.assertIn("5 秒", json.loads(denied.wfile.getvalue())["error"])
+
+        for role, grant in (("owner", cm_db.set_owner), ("super", cm_db.set_super), ("admin", cm_db.set_admin)):
+            with self.subTest(role=role):
+                uid, token = self.user("video-banner-" + role)
+                grant(uid)
+                saved = self.banner_request("PUT", upload, token=token, data=ten_seconds)
+                self.assertEqual(saved.status, 200, saved.wfile.getvalue())
+                path = json.loads(saved.wfile.getvalue())["bannerUrl"]
+                rejected = self.banner_request("PUT", upload, token=token, data=over_limit)
+                self.assertEqual(rejected.status, 400)
+                self.assertIn("10 秒", json.loads(rejected.wfile.getvalue())["error"])
+                output = Path(self.tmp.name) / "extended.mp4"
+                output.write_bytes(self.banner_request("GET", path).wfile.getvalue())
+                seconds = subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                                    "-of", "csv=p=0", str(output)])
+                self.assertEqual(float(seconds), 10)
+
+        cm_db.set_admin(uid, False)
+        self.assertEqual(self.banner_request("PUT", upload, token=token, data=ten_seconds).status, 400)
+        self.assertEqual(self.banner_request("GET", path).status, 200)

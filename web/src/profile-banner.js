@@ -41,11 +41,12 @@ function readImage(file) {
   });
 }
 
-export function bindProfileBanner(container, lossless = false) {
+export function bindProfileBanner(container, privileged = false) {
   const banner = container.querySelector('.cm-profile-banner');
   const input = banner.querySelector('input');
   const select = banner.querySelector('[data-banner="select"]');
   const remove = banner.querySelector('[data-banner="remove"]');
+  const maxVideoSeconds = privileged ? 10 : 5;
   const token = auth.token;
   const base = settings.base;
   const isCurrent = () => banner.isConnected && token === auth.token && base === settings.base;
@@ -59,7 +60,7 @@ export function bindProfileBanner(container, lossless = false) {
   function update(result) {
     if (!isCurrent()) return;
     banner.outerHTML = profileBannerHTML(result, true);
-    bindProfileBanner(container, lossless);
+    bindProfileBanner(container, privileged);
   }
 
   select.onclick = () => input.click();
@@ -79,8 +80,8 @@ export function bindProfileBanner(container, lossless = false) {
       body: `<div class="cm-banner-preview">
         <div class="cm-profile-banner cm-profile-banner-custom">${type ? '<video muted loop playsinline controls></video>'
           : '<canvas tabindex="0" aria-label="3 比 2 横幅裁切预览，可拖动或使用方向键取景"></canvas>'}</div>
-        ${type ? '<p>视频会居中裁剪为 3∶2，最长 5 秒，发布后公开静音循环播放。</p>' : `
-          <p>拖动图片调整取景，保存后会公开展示。${lossless ? '无损保存会保留裁切后的像素尺寸。' : ''}</p>
+        ${type ? `<p>视频会居中裁剪为 3∶2，最长 ${maxVideoSeconds} 秒，发布后公开静音循环播放。</p>` : `
+          <p>拖动图片调整取景，保存后会公开展示。${privileged ? '无损保存会保留裁切后的像素尺寸。' : ''}</p>
           <div class="cm-banner-crop-controls">
             <label>缩放 <input type="range" min="1" max="3" step=".01" value="1" data-crop-zoom disabled></label>
             <button type="button" data-crop-reset disabled>重置</button>
@@ -103,15 +104,16 @@ export function bindProfileBanner(container, lossless = false) {
     let crop;
     media.onload = () => {
       try {
-        crop = bindBannerCrop(dialog, media, !!lossless);
+        crop = bindBannerCrop(dialog, media, !!privileged);
         save.disabled = false;
       } catch (e) { showStatus(e.message); }
     };
     media.onloadedmetadata = () => {
-      if (media.duration > 5.05) showStatus('横幅视频最长 5 秒，请选择更短的视频。');
-      else save.disabled = false;
+      save.disabled = media.duration > maxVideoSeconds + .05;
+      if (save.disabled) showStatus(`横幅视频最长 ${maxVideoSeconds} 秒，请选择更短的视频。`);
     };
     media.onerror = () => {
+      if (type && media.duration > maxVideoSeconds + .05) return;
       showStatus(type ? '当前设备无法预览此视频，可以提交给服务器转码。' : '无法预览这张图片。');
       if (type) save.disabled = false;
     };
@@ -127,7 +129,7 @@ export function bindProfileBanner(container, lossless = false) {
         let result;
         if (type) {
           result = await api.uploadProfileBannerVideo(file.slice(0, file.size, type));
-        } else if (lossless) {
+        } else if (privileged) {
           const original = file.type ? file : file.slice(0, file.size, 'application/octet-stream');
           result = await api.uploadLosslessProfileBanner(original, crop.cropBox());
         } else {
