@@ -7,9 +7,9 @@
   · **不在请求路径上查外部接口**。`note()` 只做一次内存节流判断，然后丢给后台线程：
     命中网段缓存则直接更新用户属地块（毫秒级），未命中才请求一次外部接口（3s 超时），
     失败静默——展示层空字符串就是不显示，绝不影响登录/浏览。
-  · 网段缓存 180 天；同一用户最多每 6 小时更新一次属地（避免频繁写库）。
+  · 网段缓存 180 天；同一用户的同一网段每 6 小时更新一次属地，切换网段时立即刷新。
   · 外部接口用 ip-api.com（免费、无需 key、支持 lang=zh-CN 返回中文省份）。
-    IPv4 私网/回环/保留地址、IPv6 本机地址一律跳过。
+    Cloudflare 边缘地址和非公网地址跳过。
 """
 from __future__ import annotations
 
@@ -19,8 +19,10 @@ import queue
 import threading
 import time
 import urllib.request
+from dataclasses import dataclass
 
 import cm_db
+from cm_client_ip import region_address
 
 LOOKUP_URL = "http://ip-api.com/json/{ip}?lang=zh-CN&fields=status,country,regionName,isp,org,as,hosting,proxy"
 CACHE_TTL = 180 * 86400          # 网段→属地缓存有效期
@@ -64,11 +66,16 @@ def looks_hosting(d: dict) -> bool:
     blob = " ".join(str(d.get(k) or "") for k in ("isp", "org", "as")).lower()
     return any(h in blob for h in _HOSTING_HINTS)
 
-_last_note: dict = {}           # uid -> 下次允许尝试的时间戳
+@dataclass
+class _Observation:
+    prefix: str
+    retry_at: float = float("inf")
+
+
+_last_note: dict[int, _Observation] = {}
+_pending: dict[str, dict[int, _Observation]] = {}  # 每个网段共享一次查询
 _note_lock = threading.Lock()
-_queued: set = set()            # 已排队/查询中的网段（同一网段只查一次）
-_queued_lock = threading.Lock()
-_jobs: "queue.Queue" = queue.Queue()
+_jobs: queue.Queue = queue.Queue()
 _worker_lock = threading.Lock()
 _worker_started = False
 
@@ -84,16 +91,14 @@ def init_region_tables(conn):
 
 
 def prefix_of(ip: str) -> str:
-    """取查询/缓存用的网段键；私网、回环、保留地址返回空串（不查、不展示）。"""
-    try:
-        addr = ipaddress.ip_address(str(ip or "").strip())
-    except ValueError:
-        return ""
-    if (addr.is_private or addr.is_loopback or addr.is_reserved
-            or addr.is_multicast or addr.is_link_local or addr.is_unspecified):
-        return ""
-    net = 24 if addr.version == 4 else 48
-    return str(ipaddress.ip_network(f"{addr}/{net}", strict=False))
+    """取可用于属地查询的网段键。"""
+    address = region_address(ip)
+    return _prefix(address) if address is not None else ""
+
+
+def _prefix(address):
+    length = 24 if address.version == 4 else 48
+    return str(ipaddress.ip_network((address, length), strict=False))
 
 
 def normalize(country: str, region: str) -> str:
@@ -175,64 +180,82 @@ def _ensure_worker():
     with _worker_lock:
         if _worker_started:
             return
-        _worker_started = True
         threading.Thread(target=_worker, name="cm-ip-region", daemon=True).start()
+        _worker_started = True
+
+
+def _finish(uid, observation, region, retry_delay):
+    with _note_lock:
+        if _last_note.get(uid) is not observation:
+            return
+        try:
+            if region:
+                cm_db.set_user_region(uid, region)
+        except Exception:  # noqa: BLE001
+            retry_delay = FAIL_RETRY
+        observation.retry_at = time.monotonic() + retry_delay
+
+
+def _resolve(prefix, ip):
+    with _note_lock:
+        if not any(_last_note.get(uid) is item for uid, item in _pending[prefix].items()):
+            del _pending[prefix]
+            return False
+    region = ""
+    hosting = queried = False
+    try:
+        region = _cached(prefix)
+        if not region:
+            queried = True
+            region, hosting = _lookup_raw(ip)
+            if region:
+                _remember(prefix, region)
+    except Exception:  # noqa: BLE001
+        pass
+    with _note_lock:
+        observations = _pending.pop(prefix)
+    for uid, observation in observations.items():
+        _finish(uid, observation, region, USER_REFRESH if region or hosting else FAIL_RETRY)
+    return queried
 
 
 def _worker():
-    """串行处理查询队列：限速在免费额度内，失败允许稍后重试。"""
+    """串行查询，避免超出外部接口限额。"""
     while True:
-        uid, ip, prefix = _jobs.get()
+        prefix, ip = _jobs.get()
         try:
-            region = _cached(prefix)
-            hosting = False
-            if not region:
-                region, hosting = _lookup_raw(ip)
-            if region:
-                _remember(prefix, region)
-                cm_db.set_user_region(uid, region)
-            elif hosting:
-                # 当前走的是机房/代理出口：清掉旧标注，避免继续展示代理落点
-                cm_db.set_user_region(uid, "")
-            else:
-                # 查询失败：10 分钟后再试（而不是按 6 小时节流白等）
-                with _note_lock:
-                    _last_note[uid] = time.time() - USER_REFRESH + FAIL_RETRY
-        except Exception:  # noqa: BLE001
-            pass
+            if _resolve(prefix, ip):
+                time.sleep(LOOKUP_INTERVAL)
         finally:
-            with _queued_lock:
-                _queued.discard(prefix)
             _jobs.task_done()
-            time.sleep(LOOKUP_INTERVAL)
 
 
 def note(uid: int, ip: str):
-    """登录用户每次请求都会经过这里：节流后异步刷新该用户的属地。
-
-    绝不做任何可能抛错的事（调用方是鉴权路径）——异常一律吞掉。
-    """
+    """更新登录用户的属地，外部查询在后台完成。"""
+    observation = None
     try:
-        prefix = prefix_of(ip)
-        if not prefix or not uid:
+        address = region_address(ip)
+        if address is None or not uid:
             return
-        now = time.time()
+        uid = int(uid)
+        prefix = _prefix(address)
         with _note_lock:
-            if now < _last_note.get(uid, 0):
+            previous = _last_note.get(uid)
+            if previous and previous.prefix == prefix and time.monotonic() < previous.retry_at:
                 return
+            observation = _last_note[uid] = _Observation(prefix)
         region = _cached(prefix)
-        if region:                                      # 命中缓存：直接更新，成本极低
-            with _note_lock:
-                _last_note[uid] = now + USER_REFRESH
-            cm_db.set_user_region(int(uid), region)
+        if region:
+            _finish(uid, observation, region, USER_REFRESH)
             return
-        with _queued_lock:
-            if prefix in _queued:                       # 该网段已在查：不重复排队
-                return                                  # 也不锁死 uid，下次请求再补
-            _queued.add(prefix)
-        with _note_lock:
-            _last_note[uid] = now + USER_REFRESH
         _ensure_worker()
-        _jobs.put((int(uid), ip, prefix))
+        with _note_lock:
+            if _last_note.get(uid) is not observation:
+                return
+            if prefix not in _pending:
+                _pending[prefix] = {}
+                _jobs.put((prefix, str(address)))
+            _pending[prefix][uid] = observation
     except Exception:  # noqa: BLE001
-        pass
+        if observation is not None:
+            _finish(uid, observation, "", FAIL_RETRY)
