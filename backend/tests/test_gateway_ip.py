@@ -1,18 +1,11 @@
 #!/usr/bin/env python3
-"""client_ip / rate_key 取值链的确定性断言（v1.28.24）。
-
-背景：client_ip 旧实现取 CF-Connecting-IP → XFF **首值**，在 Cloudflare 关闭的
-部署下两者都可被调用方伪造（nginx 对 XFF 只追加不覆盖、CF 头原样透传）——实测
-伪造 XFF 首值即可让上游按任意 IP 挑 CDN 边缘、绕过按 IP 的限速桶。加固后与
-rate_key 同链：X-Real-IP（nginx 覆盖写入）→ CF-Connecting-IP → XFF 末跳 → 套接字。
-
-    python3 -m unittest backend.tests.test_gateway_ip -v
-"""
+"""Trusted client address selection and RealIP forwarding policy."""
 from __future__ import annotations
 
 import os
 import sys
 import unittest
+from http.client import HTTPMessage
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -70,6 +63,25 @@ class TestRealIpPolicy(unittest.TestCase):
 
 
 class TestClientIp(unittest.TestCase):
+    def test_direct_peer_ignores_all_forwarded_headers(self):
+        h = H({"X-Real-IP": "36.59.138.2", "CF-Connecting-IP": "8.8.8.8",
+               "X-Forwarded-For": "1.1.1.1"}, addr=("2001:4860::1", 1))
+        self.assertEqual(gw.client_ip(h), "2001:4860::1")
+
+    def test_parses_only_bare_addresses(self):
+        for invalid in ("1.1.1.1, 8.8.8.8", "[2001:4860::1]:443", "fe80::1%eth0", "unknown"):
+            h = H({"X-Real-IP": invalid, "X-Forwarded-For": "2001:4860:0:0::1"})
+            self.assertEqual(gw.client_ip(h), "2001:4860::1")
+        self.assertEqual(gw.client_ip(H({"X-Real-IP": "::ffff:1.1.1.1"})), "1.1.1.1")
+
+    def test_duplicate_proxy_headers_fall_back_to_socket(self):
+        h = H()
+        h.headers = HTTPMessage()
+        for name in ("X-Real-IP", "X-Forwarded-For"):
+            h.headers[name] = "1.1.1.1"
+            h.headers[name.lower()] = "8.8.8.8"
+        self.assertEqual(gw.client_ip(h), "127.0.0.1")
+
     def test_x_real_ip_first_and_unforgeable(self):
         """nginx 覆盖写入的 X-Real-IP 压过一切伪造头（CF 头 / XFF 首值）。"""
         h = H({"X-Real-IP": "36.59.138.2",

@@ -15,6 +15,8 @@ import hashlib
 import threading
 import time
 
+from cm_client_ip import parse_ip
+
 # 调用方不得注入的保留参数（cookie 由网关按分级决定，token 是项目自身会话）。
 # `confirm` 是网关的 T2 二次确认开关、`file` 是上传通道的文件体字段名，两者都只服务于
 # 网关自身：后者若从 query 漏进上游，等于把几 MB 的 base64 塞进 URL。上游模块里没有
@@ -113,28 +115,20 @@ MEDIA_URL_PREFIXES = (
 
 
 def client_ip(handler) -> str:
-    """取真实客户端 IP（喂给上游 realIP、按 IP 分缓存键与限速桶——取值链必须不可伪造）。
+    """读取本机反代规范化的地址，兼容旧反代写入的 XFF 末跳。"""
+    peer = parse_ip(handler.client_address[0])
+    if peer is None or not peer.is_loopback:
+        return str(peer) if peer is not None else ""
 
-    取值优先级（两个头都由 nginx **覆盖/追加写入**，调用方自带的值不可信）：
-
-      1. ``X-Real-IP``：nginx 用 ``$remote_addr`` 覆盖写入；
-      2. ``X-Forwarded-For`` 的**最后一跳**：nginx 用 ``$proxy_add_x_forwarded_for``
-         把真实对端追加在末尾（首值可能是调用方自己写的，不能信）；
-      3. 兜底 ``client_address[0]``。
-
-    Cloudflare 部署由 nginx 的 realip 模块校验连接来源，在可信的 IPv4 或 IPv6 网段内
-    才用 ``CF-Connecting-IP`` 还原 ``$remote_addr``，再覆盖写入 ``X-Real-IP``。
-    后端保持只监听回环地址，代理头由本机反代提供。
-    """
-    ip = (handler.headers.get("X-Real-IP") or "").strip()
-    if ip:
-        return ip
-    xff = handler.headers.get("X-Forwarded-For", "")
-    if xff:
-        last = xff.split(",")[-1].strip()
-        if last:
-            return last
-    return handler.client_address[0]
+    headers = handler.headers
+    get_all = getattr(headers, "get_all", None)
+    real = get_all("X-Real-IP", []) if get_all else [headers.get("X-Real-IP")]
+    address = parse_ip(real[0]) if len(real) == 1 else None
+    if address is None:
+        chain = get_all("X-Forwarded-For", []) if get_all else [headers.get("X-Forwarded-For", "")]
+        if len(chain) == 1:
+            address = parse_ip((chain[0] or "").rsplit(",", 1)[-1])
+    return str(address or peer)
 
 
 def rate_key(handler) -> str:

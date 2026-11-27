@@ -20,8 +20,9 @@ automatically installed.
 - `nginx-cloudflare-realip.conf.example` — install as a server-level include for a
   Cloudflare-proxied virtual host with `ngx_http_realip_module`. Keep both Cloudflare
   address families in the allowlist current, run `nginx -t`, and reload. Nginx
-  restores `$remote_addr` for trusted Cloudflare peers and overwrites `X-Real-IP`
-  when forwarding to the loopback backend. See [RealIP](../docs/realip.md).
+  restores `$remote_addr` for trusted Cloudflare peers. Each backend location overwrites
+  both `X-Real-IP` and `X-Forwarded-For` with that address before forwarding to port 3010.
+  Update the matching backend ranges when refreshing the allowlist. See [RealIP](../docs/realip.md).
 - Web/CDN caching: publish with `python3 tools/deploy-web.py --target data/app`.
   It creates content-addressed JS/CSS paths, retains previous bundles, and switches
   the index last. Enable the optional `/app/` locations in the Nginx template;
