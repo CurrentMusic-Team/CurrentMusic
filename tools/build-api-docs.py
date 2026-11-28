@@ -54,6 +54,7 @@ GUIDES = {
     'social-api': '社交对话、好友与群组',
     'currentmusic-ai': '聊天 AI、SSE 与模型管理', 'chat-api': '聊天室消息、SSE 与互动',
     'feedback-api': '意见反馈与 CurrentMusicX Issues',
+    'x-releases-api': 'CurrentMusicX CI 更新元数据',
     'share-api': '分享元数据与图片',
     'engine-badge-api': '流声引擎署名徽章',
     'lx-music-source': '落雪音乐自定义音源',
@@ -247,6 +248,8 @@ def endpoint_text(method, path, node, title, access=None):
         text += ['配置与响应字段见[CurrentMusicAI 管理接口](guide-currentmusic-ai.md#管理接口)。', '']
     if path == '/feedback':
         text += ['请求、回执和原文回退见[意见反馈与 CurrentMusicX Issues](guide-feedback-api.md)。', '']
+    if path == '/x/releases':
+        text += ['响应格式、缓存和回退规则见[CurrentMusicX CI 更新元数据](guide-x-releases-api.md)。', '']
     if method == 'PATCH':
         text += ['> 路由分支含 PATCH 别名，但当前 HTTP Handler 没有实现 do_PATCH；公网请使用同路径的 PUT，PATCH 不作为可用入口承诺。', '']
     path_params = re.findall(r'\{([^}]+)\}', path)
