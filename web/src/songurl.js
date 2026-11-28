@@ -86,9 +86,11 @@ async function resolveCurrentMusicUrl(meta, level, immerse, opts) {
     // 透传上游字段：sr/bits/ch（文件头解析出的真实规格，客户端据此提示高解析度档位）、
     // br/size/md5（展示与缓存判断）、host（卡顿上报要指名是哪条 CDN 线）——
     // 曾经只挑 url/type/level，导致规格信息丢失。
+    const autoSpatial = level === 'auto' && ((info?.level === 'dolby' && options.supportsDolby) ||
+      (info?.level === 'vivid' && options.supportsVivid !== false)) ? info.level : '';
     if (url) return Object.assign({}, info, {
       url, type: (info && info.type) || 'mp3', level: (info && info.level) || level || 'auto',
-      autoDolby: level === 'auto' && options.supportsDolby && info.level === 'dolby',
+      autoSpatial,
     });
     lastErr = new Error('该音质档位无可用地址');
   } catch (e) {

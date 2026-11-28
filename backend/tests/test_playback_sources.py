@@ -48,7 +48,7 @@ class PlaybackSourceTests(unittest.TestCase):
                 self.assertEqual(out['level'], 'matched')
                 match.assert_called_once_with(1, real_ip=IP_A)
 
-    def test_auto_spatial_capabilities_are_independent_on_both_routes(self):
+    def test_auto_prefers_dolby_and_enables_vivid_by_default_on_both_routes(self):
         token = self.token()
         requested = []
 
@@ -63,10 +63,12 @@ class PlaybackSourceTests(unittest.TestCase):
             primary = '/ncm/song/url?id=1'
             engine = '/audio-sources/currentmusic-engine/resolve?id=1'
             cases = [
-                (primary, '', 'jymaster', ()),
-                (engine, '&supportsDolby=1', 'dolby', ('dolby',)),
-                (engine, '&supportsVivid=1', 'vivid', ('vivid',)),
-                (primary, '&supportsVivid=1&supportsDolby=1', 'vivid', ('vivid', 'dolby')),
+                (primary, '', 'vivid', ('vivid',)),
+                (engine, '&supportsDolby=1', 'dolby', ('dolby', 'vivid')),
+                (engine, '&supportsVivid=0', 'jymaster', ()),
+                (primary, '&supportsVivid=0&supportsDolby=1', 'dolby', ('dolby',)),
+                (engine, '', 'vivid', ()),
+                (primary, '&supportsVivid=1&supportsDolby=1', 'dolby', ()),
                 (primary, '&supportsVivid=1&supportsDolby=1&maxBr=192000', 'higher', ()),
                 (primary, '&supportsVivid=1&supportsDolby=1&level=jymaster', 'jymaster', ()),
             ]
@@ -76,14 +78,14 @@ class PlaybackSourceTests(unittest.TestCase):
                     status, out = self.call('GET', route + flags, token=token)
                     self.assertEqual((status, out['level']), (200, expected))
                     self.assertEqual({lv for lv in requested if lv in ('dolby', 'vivid')}, set(spatial))
-                    if expected in ('dolby', 'vivid'):
+                    if expected in ('dolby', 'vivid') and not out['fromCache']:
                         probe.assert_called_with(out['url'], strict=True)
             requested.clear()
             self.assertTrue(self.call('GET', primary, token=token)[1]['fromCache'])
             self.assertEqual(requested, [])
 
     def test_auto_validates_each_candidate_in_quality_priority_order(self):
-        expected = ('vivid', 'dolby', 'jymaster', 'sky', 'jyeffect', 'hires',
+        expected = ('dolby', 'vivid', 'jymaster', 'sky', 'jyeffect', 'hires',
                     'lossless', 'exhigh', 'higher', 'standard')
         checked = []
 
@@ -113,7 +115,7 @@ class PlaybackSourceTests(unittest.TestCase):
         self.assertEqual(checked, [('vivid', True), ('sky', False), ('jyeffect', False),
                                    ('lossless', False), ('exhigh', False), ('higher', False), ('standard', False)])
 
-    def test_auto_refresh_reselects_when_cached_vivid_and_dolby_become_unavailable(self):
+    def test_auto_refresh_falls_from_dolby_to_vivid_then_to_regular(self):
         requested = []
         available = {'vivid', 'dolby', 'jymaster'}
 
@@ -127,12 +129,12 @@ class PlaybackSourceTests(unittest.TestCase):
         with mock.patch.object(cm_ncm, '_bounded_call', side_effect=upstream), \
              mock.patch.object(cm_ncm, 'probe_audio', return_value=(True, {})), \
              mock.patch.object(cm_ncm, 'song_url_match') as match:
-            self.assertEqual(cm_server.resolve_play_url(1, **opts)['level'], 'vivid')
+            self.assertEqual(cm_server.resolve_play_url(1, **opts)['level'], 'dolby')
             requested.clear()
-            available.remove('vivid')
-            self.assertEqual(cm_server.resolve_play_url(1, refresh=True, **opts)['level'], 'dolby')
-            self.assertEqual(requested.count('vivid'), 1)
             available.remove('dolby')
+            self.assertEqual(cm_server.resolve_play_url(1, refresh=True, **opts)['level'], 'vivid')
+            self.assertEqual(requested.count('dolby'), 1)
+            available.remove('vivid')
             self.assertEqual(cm_server.resolve_play_url(1, refresh=True, **opts)['level'], 'jymaster')
             cached = cm_server.resolve_play_url(1, **opts)
             self.assertEqual(cached['level'], 'jymaster')
@@ -267,7 +269,9 @@ class PlaybackSourceTests(unittest.TestCase):
 
     def test_auto_ignores_legacy_caches_and_isolates_resolution_by_ip(self):
         ip_hash = hashlib.sha256(IP_A.encode()).hexdigest()[:16]
-        cm_db.cache_set(f'blevel-ip:v1:1:0:{ip_hash}', json.dumps('lossless'), 600)
+        cm_db.cache_set(f'blevel-ip:v2:1:0:{ip_hash}::dolby:vivid', json.dumps('vivid'), 600)
+        stale = {'url': 'https://audio.example.test/stale', 'level': 'vivid'}
+        cm_db.cache_set(f'surl:auto:v3:1::0:{IP_A}:dolby:vivid', json.dumps(stale), 600)
         cm_db.cache_set(f'surl_req:1:auto::0:{IP_A}:err', '未取得播放地址', 600)
         legacy = {'url': 'https://audio.example.test/legacy.mp3', 'level': 'standard'}
         cm_db.cache_set(f'surl:v2:1:jymaster::0:{IP_A}', json.dumps(legacy), 600)
@@ -278,10 +282,10 @@ class PlaybackSourceTests(unittest.TestCase):
 
         with mock.patch.object(cm_ncm, '_bounded_call', side_effect=upstream), \
              mock.patch.object(cm_ncm, 'probe_audio', return_value=(True, {})) as probe:
-            first = cm_server.resolve_play_url(1, real_ip=IP_A)
-            again = cm_server.resolve_play_url(1, real_ip=IP_A)
-            other = cm_server.resolve_play_url(1, real_ip=IP_B)
-            self.assertEqual([out['level'] for out in (first, again, other)], ['jymaster'] * 3)
+            first = cm_server.resolve_play_url(1, real_ip=IP_A, supports_dolby=True)
+            again = cm_server.resolve_play_url(1, real_ip=IP_A, supports_dolby=True)
+            other = cm_server.resolve_play_url(1, real_ip=IP_B, supports_dolby=True)
+            self.assertEqual([out['level'] for out in (first, again, other)], ['dolby'] * 3)
             self.assertEqual([out['fromCache'] for out in (first, again, other)], [False, True, False])
             self.assertEqual(probe.call_count, 2)
 

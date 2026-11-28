@@ -11,12 +11,12 @@
 
 ## 自动最高音质
 
-`GET /cm/ncm/song/url?id=2082700997&level=auto&supportsVivid=1&supportsDolby=1`
+`GET /cm/ncm/song/url?id=2082700997&level=auto&supportsDolby=1`
 
-- `level` 默认是 `auto`。后端依次选择 `vivid` → `dolby` → `jymaster` → `sky` → `jyeffect` → `hires` → `lossless` → `exhigh` → `higher` → `standard` 中第一个可用的档位。
-- `supportsVivid=1` 声明客户端可播放臻音全景声，`supportsDolby=1` 声明客户端可播放杜比全景声。两项能力独立启用，默认均关闭。正数 `maxBr` 只考虑常规档位，并按名义码率筛选，`higher` 的边界为 192000 bps。显式请求档位按指定档取址，例如 `level=jymaster`。
+- `level` 默认是 `auto`。后端依次选择 `dolby` → `vivid` → `jymaster` → `sky` → `jyeffect` → `hires` → `lossless` → `exhigh` → `higher` → `standard` 中第一个可用的档位。
+- 客户端用 `supportsDolby=1` 声明杜比播放能力。设备或曲目缺少杜比支持时，服务端默认尝试臻音全景声。客户端可传 `supportsVivid=0` 跳过臻音。正数 `maxBr` 只考虑常规档位，并按名义码率筛选，`higher` 的边界为 192000 bps。显式请求档位按指定档取址，例如 `level=jymaster`。
 - 候选必须包含完整音源和对应的实际档位。上游降档、缺少实际档位、只有试听或音频头校验失败时继续下一档。两档全景声必须通过严格的音频头校验。响应的 `level` 表示实际选中的档位。
-- 当前 Web 根据播放器报告的 EC-3 能力声明杜比支持。自动选中的杜比发生播放错误时，网页会为当前歌曲重试常规档位。
+- 当前 Web 根据播放器报告的 EC-3 能力声明杜比支持。自动选中的杜比发生播放错误时，网页会为当前歌曲尝试臻音。臻音播放失败时继续尝试常规档位。
 
 ## RealIP
 

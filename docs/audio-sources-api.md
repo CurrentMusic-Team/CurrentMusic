@@ -29,11 +29,11 @@
 | `level` | 默认 `auto`，接受现有网易云取链音质值 |
 | `refresh` | 传 `1` 时请求换线或刷新播放地址 |
 | `supportsDolby` | 支持杜比的设备在自动音质下传 `1` |
-| `supportsVivid` | 支持臻音全景声的设备在自动音质下传 `1` |
+| `supportsVivid` | 默认启用臻音全景声，传 `0` 跳过该档 |
 
 ```sh
 curl -H "Authorization: Bearer ${CURRENTMUSIC_TOKEN}" \
   'https://music.20110208.xyz/cm/audio-sources/currentmusic-engine/resolve?id=12345&level=auto&supportsDolby=1'
 ```
 
-自动音质使用后端的档位优先级，两项全景声能力独立声明。成功响应沿用 [网易云播放取链](playback-sources.md) 的 `url`、实际 `level`、`type` 和音频信息。两个接口均返回 `Cache-Control: no-store`。缺少有效登录会话时返回 `401`；无效歌曲 ID 返回 `400`；未注册的音源返回 `404`；频率超限返回 `429`；解析不到经过校验的音频时返回 `502`，错误码为 `playback_match_failed`。
+自动音质优先尝试客户端支持的杜比全景声，随后默认尝试臻音全景声。成功响应沿用 [网易云播放取链](playback-sources.md) 的 `url`、实际 `level`、`type` 和音频信息。两个接口均返回 `Cache-Control: no-store`。缺少有效登录会话时返回 `401`；无效歌曲 ID 返回 `400`；未注册的音源返回 `404`；频率超限返回 `429`；解析不到经过校验的音频时返回 `502`，错误码为 `playback_match_failed`。

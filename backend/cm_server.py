@@ -785,7 +785,7 @@ def _probe_one(ncm_id, level, real_ip, cn_ip, immerse):
 def _verify_auto_audio(ncm_id, level, result):
     if result is None:
         return None
-    ok, spec = cm_ncm.probe_audio(result["url"], strict=level in cm_stream.OPT_IN_TIERS)
+    ok, spec = cm_ncm.probe_audio(result["url"], strict=level in cm_stream.SPATIAL_TIERS)
     if not ok:
         log.info("档位校验未通过 song=%s level=%s（顺位降档）", ncm_id, level)
         return None
@@ -808,7 +808,7 @@ def best_level(ncm_id, real_ip=None, max_br=0, supports_dolby=False, cn_ip=False
     ip_ident = "cn" if cn_ip else (real_ip or "")
     ip_key = hashlib.sha256(ip_ident.encode()).hexdigest()[:16]
     capability = _audio_capability_key("dolby" in tiers, "vivid" in tiers)
-    key = f"blevel-ip:v2:{int(ncm_id)}:{max_br}:{ip_key}:{immerse or ''}{capability}"
+    key = f"blevel-ip:v3:{int(ncm_id)}:{max_br}:{ip_key}:{immerse or ''}{capability}"
 
     def fetch(level):
         return _probe_one(ncm_id, level, real_ip, cn_ip, immerse)
@@ -911,7 +911,7 @@ class PlaybackMatchError(cm_ncm.NcmError):
 
 def resolve_play_url(ncm_id, level="auto", immerse=None, real_ip=None,
                      max_br=0, refresh=False, alts=False, want_host="", supports_dolby=False,
-                     cn_ip=False, *, supports_vivid=False):
+                     cn_ip=False, *, supports_vivid=True):
     """官方音源优先；失败后仅下发经过严格音频校验的灰色曲目匹配结果。
 
     ``cn_ip`` 只在**落雪直链**路径启用：官方取址改走上游 randomCNIP（固定国内 IP），
@@ -961,7 +961,7 @@ def resolve_play_url(ncm_id, level="auto", immerse=None, real_ip=None,
 
 def _resolve_official_play_url(ncm_id, level="auto", immerse=None, real_ip=None,
                                max_br=0, refresh=False, alts=False, want_host="", supports_dolby=False,
-                               cn_ip=False, *, supports_vivid=False):
+                               cn_ip=False, *, supports_vivid=True):
     """解析播放地址，返回可直接下发的响应 dict。
 
     与旧实现的差别（都是「后端能做、客户端做不到」的事）：
@@ -986,7 +986,7 @@ def _resolve_official_play_url(ncm_id, level="auto", immerse=None, real_ip=None,
     ip_ident = "cn" if cn_ip else (real_ip or "")
     if auto:
         capability = _audio_capability_key(supports_dolby, supports_vivid)
-        rt_key = f"surl:auto:v3:{ncm_id}:{immerse or ''}:{max_br}:{ip_ident}{capability}"
+        rt_key = f"surl:auto:v4:{ncm_id}:{immerse or ''}:{max_br}:{ip_ident}{capability}"
         req_key = rt_key
     else:
         req_key = f"surl_req:{ncm_id}:{level}:{immerse or ''}:{max_br}:{ip_ident}"
@@ -2313,7 +2313,7 @@ def respond_play_url(handler, q, *, cn_ip=False):
             alts=_truthy(q.get("alts")),
             want_host=(q.get("host") or "").strip(),
             supports_dolby=_truthy(q.get("supportsDolby", "0")),
-            supports_vivid=_truthy(q.get("supportsVivid", "0")),
+            supports_vivid=_truthy(q.get("supportsVivid", "1")),
             cn_ip=cn_ip,
         )
     except PlaybackMatchError as e:
@@ -2557,7 +2557,7 @@ def route(handler, method):
             "level": q.get("level"),
             "refresh": q.get("refresh"),
             "supportsDolby": q.get("supportsDolby"),
-            "supportsVivid": q.get("supportsVivid"),
+            "supportsVivid": q.get("supportsVivid", "1"),
         })
 
     if path == "/badges/powered-by.svg" and method == "GET":
@@ -3505,7 +3505,7 @@ def route(handler, method):
             ("GET", "/ncmbind/likelist", "Bearer", "绑定账号红心列表 {ids}；refresh=1 强制同步，短期合并已成功写入但上游尚未收敛的红心意图"),
             ("GET", "/daily", "可选登录", "每日推荐"),
             ("GET", "/ncm/search", "公开", "网易云搜索代理，透传 NGINX 提供的用户 RealIP 并按用户 IP 隔离缓存；单曲首屏可含 catalogSongs（公开专辑精确匹配，不计入上游分页）。type=lyric 按歌词搜索（1006），songs 含命中行及前后文 lyric/lyricContext，分页使用 totals.song/hasMore.song；失败通过 lyricContextStatus 明示。详见 /api-docs/reference/guide-search-catalog/ 与 /api-docs/reference/guide-search-lyrics-api/"),
-            ("GET", "/ncm/song/url", "Bearer", "播放地址解析（**仅限注册用户**；自动音质按档位优先级选择，支持 supportsVivid 与 supportsDolby 能力声明；level / maxBr 码率上限 / refresh 卡顿换线 / alts 候选边缘；透传用户 RealIP；官方取址失败或仅有试听时自动匹配，成功结果 level=matched 并附完整音频校验信息；落雪取链在匹配失败后还会尝试旧版官方取址（level=legacy）；无可用地址返回 502 与 code=playback_match_failed。详见 /api-docs/reference/guide-playback-sources/）"),
+            ("GET", "/ncm/song/url", "Bearer", "播放地址解析（**仅限注册用户**；自动音质先尝试设备支持的杜比，随后默认尝试臻音，支持通过 supportsVivid=0 跳过臻音；level / maxBr 码率上限 / refresh 卡顿换线 / alts 候选边缘；透传用户 RealIP；官方取址失败或仅有试听时自动匹配，成功结果 level=matched 并附完整音频校验信息；落雪取链在匹配失败后还会尝试旧版官方取址（level=legacy）；无可用地址返回 502 与 code=playback_match_failed。详见 /api-docs/reference/guide-playback-sources/）"),
             ("GET", "/ncm/song/detail", "公开", "歌曲详情（ids=逗号分隔，最多 100；分享落地页与客户端使用）"),
             ("GET", "/song/qualities", "公开", "歌曲音质文件资料（含沉浸声变体；不保证可播放）；详见 /api-docs/reference/guide-song-insights-api/"),
             ("GET", "/song/chorus", "公开", "播放器高潮（副歌）区间。按网易云歌曲 id 返回 segments，startMs/endMs 均为毫秒。没有区间时返回空数组。详见 /api-docs/reference/guide-song-insights-api/"),
@@ -5224,7 +5224,7 @@ def route(handler, method):
         """播放地址解析（抗卡顿增强版，见 resolve_play_url）。
 
         参数：``id``（必填）、``level``（默认 auto）、``immerse``（仅 sky）、
-        ``supportsVivid=1``（设备支持臻音全景声）、``supportsDolby=1``（设备支持杜比全景声）、
+        ``supportsDolby=1``（设备支持杜比全景声）、``supportsVivid=0``（跳过默认尝试的臻音全景声）、
         ``maxBr``（码率上限，仅 auto 生效）、``refresh=1``（卡顿自愈：换 CDN 线 / 换新签名）、
         ``alts=1``（附带已验证可互换的边缘列表）、``host``（指定边缘，须已验证）。
         """

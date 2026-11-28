@@ -58,10 +58,10 @@ class TestMaxBr(unittest.TestCase):
 class TestQualityPriority(unittest.TestCase):
     def test_auto_priority_uses_independent_spatial_capabilities(self):
         regular = ("jymaster", "sky", "jyeffect", "hires", "lossless", "exhigh", "higher", "standard")
-        self.assertEqual(S.probe_tiers(), regular)
-        self.assertEqual(S.probe_tiers(supports_dolby=True), ("dolby", *regular))
-        self.assertEqual(S.probe_tiers(supports_vivid=True), ("vivid", *regular))
-        self.assertEqual(S.probe_tiers(supports_dolby=True, supports_vivid=True), ("vivid", "dolby", *regular))
+        self.assertEqual(S.probe_tiers(), ("vivid", *regular))
+        self.assertEqual(S.probe_tiers(supports_dolby=True), ("dolby", "vivid", *regular))
+        self.assertEqual(S.probe_tiers(supports_vivid=False), regular)
+        self.assertEqual(S.probe_tiers(supports_dolby=True, supports_vivid=False), ("dolby", *regular))
 
 
 class TestEdgeFamily(unittest.TestCase):
