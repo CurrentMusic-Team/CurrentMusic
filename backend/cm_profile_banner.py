@@ -88,30 +88,38 @@ def _encode(source, target, probe, encoder, max_seconds):
             raise MediaError(400, "横幅视频须为 MP4 或 MOV 文件")
     with tempfile.TemporaryFile(dir=source.parent) as report:
         _run([probe, "-v", "error", *MOV_INPUT_ARGS, "-select_streams", "V:0", "-show_entries",
-              "format=duration:stream=index,width,height,duration", "-of", "json", source],
+              "format=start_time,duration:stream=index,width,height,start_time,duration", "-of", "json", source],
              65536, 10, source.parent, report)
         report.seek(0)
         try:
             info = json.load(report)
             video = info["streams"][0]
             width, height = video["width"], video["height"]
-            duration = float(video.get("duration") or info["format"]["duration"])
+            container = info["format"]
+            duration = float(video.get("duration") or container["duration"])
+            input_start = float(container.get("start_time", 0))
+            video_start = float(video.get("start_time", input_start))
         except (IndexError, KeyError, TypeError, ValueError) as exc:
             raise MediaError(400, "无法读取横幅视频的尺寸或时长") from exc
     if min(width, height) < 2 or max(width, height) > 3840 or width * height > 3840 * 2160:
         raise MediaError(400, "横幅视频最长边需 ≤3840 像素，总像素数需 ≤830 万")
     if not math.isfinite(duration) or not 0 < duration <= max_seconds:
         raise MediaError(400, f"横幅视频最长 {max_seconds} 秒")
+    if not math.isfinite(video_start - input_start):
+        raise MediaError(400, "无法读取横幅视频的起始时间")
 
+    # FFmpeg shifts the input start to zero. Stop at the picture's end on that timeline.
+    end = min(max_seconds, duration + max(0, video_start - input_start))
     output_limit = VIDEO_OUTPUT_BYTES * max_seconds // VIDEO_SECONDS
     filters = "crop=w='min(iw,ih*3/2/sar)':h='min(ih,iw*sar*2/3)',scale=720:480,setsar=1,fps=24"
     _run([encoder, "-nostdin", "-v", "error", "-xerror", "-err_detect", "explode",
           "-abort_on", "empty_output", *MOV_INPUT_ARGS, "-threads", "1", "-i", source,
-          "-map", f"0:{video['index']}", "-an", "-sn", "-dn", "-map_metadata", "-1",
-          "-map_metadata:s", "-1", "-map_chapters", "-1", "-t", str(max_seconds),
+          "-map", f"0:{video['index']}", "-map", "0:a:0?", "-sn", "-dn", "-map_metadata", "-1",
+          "-map_metadata:s", "-1", "-map_chapters", "-1", "-t", str(end),
           "-filter_threads", "1", "-vf", filters, "-threads", "1", "-c:v", "libx264",
           "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23", "-maxrate", "2M",
-          "-bufsize", "2M", "-movflags", "+faststart", target], output_limit, max_seconds * 4, source.parent)
+          "-bufsize", "2M", "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000",
+          "-movflags", "+faststart", target], output_limit, max_seconds * 4, source.parent)
 
 
 def _run(args, size, timeout, work, stdout=subprocess.DEVNULL):

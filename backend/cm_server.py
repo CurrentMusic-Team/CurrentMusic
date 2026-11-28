@@ -3342,7 +3342,7 @@ def route(handler, method):
             ("POST", "/auth/logout", "Bearer", "退出当前设备并撤销会话"),
             ("GET", "/auth/me", "Bearer", "当前账户资料与统计（含 bannerUrl、累计积分 points 和等级 level，视频横幅另含 bannerType）"),
             ("GET", "/profile", "Bearer", "当前账户资料与统计（bannerUrl 为 API 基址相对路径，空串表示未设置，视频横幅另含 bannerType）"),
-            ("PUT", "/profile/banner", "Bearer", "上传或替换 3∶2 主页横幅。普通图片使用 Base64 JSON；站长、超管和管理员可用原图和 crop 参数无损裁切。MP4/MOV 最大 16 MiB，普通账号最长 5 秒，站长、超管或管理员最长 10 秒。返回 bannerUrl，视频另含 bannerType"),
+            ("PUT", "/profile/banner", "Bearer", "上传或替换 3∶2 主页横幅。普通图片使用 Base64 JSON；站长、超管和管理员可用原图和 crop 参数无损裁切。MP4/MOV 最大 16 MiB，普通账号最长 5 秒，站长、超管或管理员最长 10 秒。视频保留首条音轨，返回 bannerUrl 和 bannerType"),
             ("DELETE", "/profile/banner", "Bearer", "移除自己的公开主页横幅，返回空 bannerUrl"),
             ("GET", "/auth/sessions", "Bearer", "在线设备列表 {max:null,sessions}；数量不限，超过 5 台时客户端提示风险"),
             ("DELETE", "/auth/sessions/{id}", "Bearer", "下线指定设备"),

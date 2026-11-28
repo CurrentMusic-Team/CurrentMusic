@@ -227,11 +227,13 @@ class TestCommunity(unittest.TestCase):
         self.assertEqual(self.banner_request("PUT", upload, token=token, data=source, headers=headers).status, 403)
         self.assertEqual(self.banner_request("GET", path).status, 200)
 
-    def make_banner_clip(self, seconds):
-        source = Path(self.tmp.name) / f"source-{seconds}.mov"
-        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=120x200:rate=24",
-                        "-f", "lavfi", "-i", "sine=frequency=440", "-t", str(seconds),
-                        "-c:v", "libx264", "-threads", "1", "-c:a", "aac", str(source)], check=True)
+    def make_banner_clip(self, seconds, *, audio_seconds=None):
+        audio_seconds = seconds if audio_seconds is None else audio_seconds
+        source = Path(self.tmp.name) / f"source-{seconds}-{audio_seconds}.mov"
+        args = ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"testsrc2=size=120x200:rate=24:duration={seconds}"]
+        if audio_seconds:
+            args += ["-f", "lavfi", "-i", f"sine=frequency=440:duration={audio_seconds}", "-c:a", "aac"]
+        subprocess.run([*args, "-c:v", "libx264", "-threads", "1", str(source)], check=True)
         return source.read_bytes()
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg unavailable")
@@ -261,8 +263,12 @@ class TestCommunity(unittest.TestCase):
         output.write_bytes(data)
         reported = subprocess.check_output(["ffprobe", "-v", "error", "-show_entries",
                                             "stream=codec_type,codec_name,width,height,duration", "-of", "json", str(output)])
-        self.assertEqual(json.loads(reported)["streams"], [{"codec_name": "h264", "codec_type": "video", "width": 720,
-                                                           "height": 480, "duration": "5.000000"}])
+        streams = json.loads(reported)["streams"]
+        self.assertEqual(streams[0], {"codec_name": "h264", "codec_type": "video", "width": 720,
+                                      "height": 480, "duration": "5.000000"})
+        self.assertEqual([(stream["codec_type"], stream["codec_name"]) for stream in streams[1:]], [("audio", "aac")])
+        audio = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(output), "-map", "0:a:0", "-f", "s16le", "-"])
+        self.assertTrue(any(audio))
 
         part = self.banner_request("GET", path, headers={"Range": "bytes=0-1"})
         self.assertEqual(part.status, 206)
@@ -279,6 +285,25 @@ class TestCommunity(unittest.TestCase):
 
         self.assertEqual(self.call("DELETE", upload, token=token), (200, {"bannerUrl": ""}))
         self.assertEqual(self.call("GET", path)[0], 404)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg unavailable")
+    def test_video_banner_audio_follows_picture_duration(self):
+        _, token = self.user("video-banner-audio-duration")
+        for audio_seconds in (0, 1, 4):
+            with self.subTest(audio_seconds=audio_seconds):
+                saved = self.banner_request("PUT", "/profile/banner", token=token,
+                                            data=self.make_banner_clip(2, audio_seconds=audio_seconds))
+                self.assertEqual(saved.status, 200, saved.wfile.getvalue())
+                path = json.loads(saved.wfile.getvalue())["bannerUrl"]
+                output = Path(self.tmp.name) / "audio-duration.mp4"
+                output.write_bytes(self.banner_request("GET", path).wfile.getvalue())
+                reported = subprocess.check_output(["ffprobe", "-v", "error", "-show_entries",
+                                                    "format=duration:stream=codec_type,duration", "-of", "json", str(output)])
+                info = json.loads(reported)
+                self.assertEqual([stream["codec_type"] for stream in info["streams"]],
+                                 ["video", "audio"] if audio_seconds else ["video"])
+                self.assertEqual(float(info["streams"][0]["duration"]), 2)
+                self.assertAlmostEqual(float(info["format"]["duration"]), 2, delta=.03)
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg unavailable")
     def test_video_banner_duration_by_role(self):
