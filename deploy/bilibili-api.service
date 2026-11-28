@@ -1,0 +1,23 @@
+[Unit]
+Description=CurrentMusic Bilibili API adapter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+WorkingDirectory=/opt/bilibili-api
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+LoadCredential=bilibili-cookie:/etc/currentmusic/bilibili-cookie
+ExecStart=/opt/bilibili-api/.venv/bin/python /opt/bilibili-api/server.py
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

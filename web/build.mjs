@@ -39,6 +39,8 @@ await rm(OUT, { recursive: true, force: true });
 await mkdir(OUT, { recursive: true });
 await cp('../assets/brand/currentmusic-icon.png', `${OUT}/brand-icon.png`);
 await cp('../assets/brand/apple-touch-icon.png', `${OUT}/apple-touch-icon.png`);
+await cp('vendor/dashjs-5.3.0.min.js', `${OUT}/dashjs-5.3.0.min.js`);
+await cp('vendor/dashjs-LICENSE.md', `${OUT}/dashjs-LICENSE.txt`);
 
 await build({
   entryPoints: ['src/main.js'],

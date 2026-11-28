@@ -4,6 +4,7 @@
 // 输入框失焦、TAB 位置丢失、图表闪一下白屏。现在页面只渲染一次外壳，
 // 各 TAB 各自懒加载、各自局部刷新；用户搜索回车触发，只更新列表与分页。
 import { mountSocialReports } from './admin-social.js';
+import { adminBilibiliPane } from './admin-bilibili.js';
 import { mdui } from '../md.js';
 import { api, auth, settings } from '../api.js';
 import { bindDonationDestination, donationDestinationFields, donationDestinationLabel } from '../donation-destination.js';
@@ -47,6 +48,7 @@ const TABS = [
   { k: 'ai', label: 'AI 管理', icon: 'auto_awesome' },
   { k: 'social', label: '社交举报', icon: 'flag' },
   { k: 'diagnostics', label: '反馈诊断', icon: 'feedback' },
+  { k: 'bilibili', label: '哔哩哔哩', icon: 'smart_display' },
   { k: 'system', label: '系统', icon: 'settings' },
 ];
 const TAB_DESC = {
@@ -59,6 +61,7 @@ const TAB_DESC = {
   clients: 'CurrentMusic 与 CurrentMusicX 版本与更新说明',
   ai: 'CurrentMusicAI 模型设置、连通性测试与对话历史',
   diagnostics: '查看和下载 Bug 反馈随附的截图、录屏与诊断 ZIP',
+  bilibili: '管理自动匹配与歌曲关联',
   system: '数据量、角色与缓存维护',
 };
 const DIAGNOSTICS_ID = /^[0-9a-f]{32}$/;
@@ -296,6 +299,7 @@ export async function render(el, params) {
         <div class="cm-ulist" id="feedbackDiagnosticsFiles"></div>
       </section>
 
+      <section class="cm-apane" data-pane="bilibili" id="pane-bilibili" hidden></section>
       <section class="cm-apane" data-pane="system" id="pane-system" hidden>
         <div id="systemBody"></div>
       </section>
@@ -310,6 +314,7 @@ export async function render(el, params) {
     b.hidden = !text;
   };
   // 滑动选中胶囊：按钮宽度随徽标变化，几何每次重新量，不做固定下标动画
+  const bilibiliPane = adminBilibiliPane(el.querySelector('#pane-bilibili'));
   const tabsEl = el.querySelector('#adminTabs');
   const tabInd = document.createElement('span');
   tabInd.className = 'cm-atab-ind';
@@ -387,7 +392,8 @@ export async function render(el, params) {
     } else if (k === 'ai') {
       loadAi();
       loadAiHistory();
-    } else if (k === 'system') renderSystem();
+    } else if (k === 'bilibili') bilibiliPane.load();
+    else if (k === 'system') renderSystem();
     if (k === 'social') mountSocialReports(el.querySelector('[data-social-reports]'));
   };
   el.querySelectorAll('.cm-atab').forEach(b => { b.onclick = () => setTab(b.dataset.tab); });
@@ -1618,6 +1624,8 @@ export async function render(el, params) {
         await loadClients();
       } else if (S.tab === 'ai') {
         await Promise.all([loadAi(), loadAiHistory()]);
+      } else if (S.tab === 'bilibili') {
+        await bilibiliPane.load();
       } else if (S.tab === 'system') {
         await loadOverview();
         renderSystem();

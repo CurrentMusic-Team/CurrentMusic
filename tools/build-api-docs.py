@@ -30,11 +30,12 @@ GROUPS = {
     'roaming': '私人漫游', 'share': '分享', 'plays': '播放历史', 'decorations': '头像挂件',
     'download': '客户端与资源', 'x': '客户端与资源', 'cast': '客户端与资源', 'badges': '客户端与资源',
     'lx': '客户端与资源', 'audio-sources': '客户端与资源', 'music-service': '外接音乐服务',
-    'kugou': '酷狗概念版', 'library': '曲库与聚合歌单',
+    'kugou': '酷狗概念版', 'bilibili': '哔哩哔哩', 'library': '曲库与聚合歌单',
 }
 MUSIC_PLATFORM_GUIDES = {
     'netease': ('netease-music-api', '网易云音乐 API'),
     'kugou': ('kugou-concept-api', '酷狗概念版 API'),
+    'bilibili': ('bilibili-api', '哔哩哔哩 API'),
 }
 GUIDES = {
     'community-api': '个人主页、横幅与帖子',
@@ -319,7 +320,8 @@ def write_music_service_specs(output):
         key: {"label": op.label, "providers": list(op.providers), "scope": op.scope or None,
               "write": op.write, "media": op.media or None,
               **({"kugouSearchKinds": list(cm_music_service.cm_kugou_catalog.SEARCH_TYPES)}
-                 if key == "catalog.search" else {})}
+                 if key == "catalog.search" else {}),
+              **({"bilibiliSearchKinds": ["song", "mv"]} if key == "catalog.search" else {})}
         for key, op in cm_music_service.OPERATIONS.items()
     }
     (output/'music-service-capabilities.json').write_text(

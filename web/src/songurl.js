@@ -7,6 +7,7 @@
 import { network, sourceIdentity } from './network.js';
 import { api } from './api.js';
 import { isKugouSong, resolveKugouSong } from './kugou.js';
+import { bilibiliMediaUrl, isBilibiliSong, resolveBilibiliSong } from './bilibili.js';
 
 // EC-3 解码能力由当前浏览器报告。实际输出由系统和音频设备决定。
 function supportsDolby() {
@@ -37,7 +38,8 @@ function pickUrl(d) {
  * @returns {Promise<{url:string,type:string,level:string,host?:string,hosts?:string[]}>}
  */
 export async function resolveSongUrl(meta, level, immerse, opts) {
-  if (isKugouSong(meta)) return resolveKugouSong(meta, level);
+  if (isBilibiliSong(meta)) return resolveBilibiliSong(meta, level, opts);
+  if (isKugouSong(meta)) return resolveKugouSong(meta, level, opts?.supportsDolby ?? supportsDolby());
   const identity = sourceIdentity();
   let info;
   try { info = await resolveProviderUrl(meta, level, immerse, opts); }
@@ -79,7 +81,7 @@ async function resolveCurrentMusicUrl(meta, level, immerse, opts) {
   try {
     // immerse 必须一起传：音效「沉浸环绕声·环绕」就是 sky + immerseType=ste，
     // 漏传会静默降级成默认的 c51(5.1) 流。
-    const options = { alts: true, ...opts };
+    const options = { alts: true, allowBilibili: true, ...opts };
     if (level === 'auto' && options.supportsDolby === undefined) options.supportsDolby = supportsDolby();
     const info = await api.songUrl(id, level, immerse, options);
     const url = pickUrl(info);
@@ -89,7 +91,7 @@ async function resolveCurrentMusicUrl(meta, level, immerse, opts) {
     const autoSpatial = level === 'auto' && ((info?.level === 'dolby' && options.supportsDolby) ||
       (info?.level === 'vivid' && options.supportsVivid !== false)) ? info.level : '';
     if (url) return Object.assign({}, info, {
-      url, type: (info && info.type) || 'mp3', level: (info && info.level) || level || 'auto',
+      url: info?.provider === 'bilibili' ? bilibiliMediaUrl(url) : url, type: (info && info.type) || 'mp3', level: (info && info.level) || level || 'auto',
       autoSpatial,
     });
     lastErr = new Error('该音质档位无可用地址');

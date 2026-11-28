@@ -2,13 +2,15 @@ import { auth } from './api.js';
 import { kugouRequest, kugouScope, kugouSong } from './kugou.js';
 
 export function musicPlatform() {
-  return localStorage.getItem('cm.music.platform:' + kugouScope()) === 'kugou' ? 'kugou' : 'netease';
+  const value = localStorage.getItem('cm.music.platform:' + kugouScope());
+  return ['kugou', 'bilibili'].includes(value) ? value : 'netease';
 }
 
 export function platformSelector(platform) {
   return `<select class="cm-platform-select" aria-label="音乐平台">
     <option value="netease"${platform === 'netease' ? ' selected' : ''}>网易云音乐</option>
     <option value="kugou"${platform === 'kugou' ? ' selected' : ''}>酷狗概念版</option>
+    <option value="bilibili"${platform === 'bilibili' ? ' selected' : ''}>哔哩哔哩</option>
   </select>`;
 }
 

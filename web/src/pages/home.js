@@ -4,6 +4,7 @@ import { api, auth, ncmSongs, settings } from '../api.js';
 import { esc, renderSongList, toast } from '../ui.js';
 import { player } from '../player.js';
 import { bindPlatformSelector, kugouDetailLink, kugouHome, musicPlatform, platformSelector } from '../music-platform.js';
+import { renderSearch as renderBilibiliSearch } from './bilibili.js';
 import { levelBadge } from '../level-badges.js';
 import { bindDailyShelf, homeDaily, homeIntro, homeShortcuts } from './home-sections.js';
 
@@ -98,6 +99,12 @@ export async function render(el) {
   const compact = localStorage.getItem('cm-home-style') === 'cmx-simple';
   const intro = homeIntro(platformSelector(platform));
   const bindSelector = () => bindPlatformSelector(el, () => render(el));
+  if (platform === 'bilibili') {
+    el.innerHTML = `<div class="cm-home-layout">${intro}<section data-bilibili-search></section></div>`;
+    bindSelector();
+    renderBilibiliSearch(el.querySelector('[data-bilibili-search]'));
+    return;
+  }
   el.innerHTML = `<div class="cm-home-layout">${intro}${homeDaily([], { loading: true, compact })}</div>`;
   bindSelector();
   const initialSelector = el.querySelector('.cm-platform-select');

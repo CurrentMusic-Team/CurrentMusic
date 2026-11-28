@@ -1,3 +1,4 @@
+import { renderSearch as renderBilibiliSearch } from './bilibili.js';
 // 搜索建议防抖，明确提交后才搜索并写入历史。
 //
 // 加载策略（本页性能的关键）：
@@ -65,7 +66,9 @@ function animateIn(els, { y = 8, stagger = 26, cap = 160 } = {}) {
 let seq = 0;
 
 export async function render(el, params = []) {
-  const kugou = musicPlatform() === 'kugou';
+  const platform = musicPlatform();
+  if (platform === 'bilibili') { renderBilibiliSearch(el); return; }
+  const kugou = platform === 'kugou';
   const detailLink = (kind, id) => kugou ? kugouDetailLink(kind, id)
     : `#/${kind === 'playlist' ? 'ncmpl' : kind}/${id}`;
   const catalog = (kind, text, offset = 0, limit = BATCH) =>

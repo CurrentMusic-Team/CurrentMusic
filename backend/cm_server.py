@@ -26,6 +26,7 @@ import cm_cast
 import cm_2fa
 import cm_passkeys
 import cm_db
+import cm_bilibili
 import cm_decor
 import cm_feedback
 import cm_feedback_diagnostics
@@ -2293,7 +2294,7 @@ def _ncm_like_counts(ids, refresh=False):
     return out
 
 
-def respond_play_url(handler, q, *, cn_ip=False):
+def respond_play_url(handler, q, *, cn_ip=False, uid=0):
     try:
         ncm_id = int(q.get("id") or 0)
     except ValueError:
@@ -2303,16 +2304,29 @@ def respond_play_url(handler, q, *, cn_ip=False):
     level = q.get("level") or "auto"
     if level != "auto" and level not in VALID_LEVELS:
         level = "lossless"
+    supports_dolby = _truthy(q.get('supportsDolby', '0'))
+    max_br = q.get('maxBr') or q.get('maxbr') or 0
+    if (uid and not cn_ip and level == 'auto' and supports_dolby and not cm_stream.quantize_max_br(max_br)
+            and _truthy(q.get('allowBilibili')) and cm_bilibili.playback_enabled()):
+        real_ip = cm_ncm_gateway.client_ip(handler)
+        native = _verify_auto_audio(ncm_id, 'dolby', _probe_one(ncm_id, 'dolby', real_ip, False, None))
+        if native:
+            return jresp(handler, 200, dict(native, level='dolby', requestedLevel='auto'))
+        alternate = cm_bilibili.linked_dolby('netease', ncm_id, uid, base_url(handler))
+        if alternate:
+            return jresp(handler, 200, {**alternate, 'level': 'dolby', 'type': alternate['format'],
+                                         'br': alternate['bitrate'], 'requestedLevel': 'auto'}, cache_control='no-store')
+        supports_dolby = False
     try:
         out = resolve_play_url(
             ncm_id, level,
             immerse=q.get("immerse") or None,
             real_ip=cm_ncm_gateway.client_ip(handler),
-            max_br=q.get("maxBr") or q.get("maxbr") or 0,
+            max_br=max_br,
             refresh=_truthy(q.get("refresh")),
             alts=_truthy(q.get("alts")),
             want_host=(q.get("host") or "").strip(),
-            supports_dolby=_truthy(q.get("supportsDolby", "0")),
+            supports_dolby=supports_dolby,
             supports_vivid=_truthy(q.get("supportsVivid", "1")),
             cn_ip=cn_ip,
         )
@@ -2501,6 +2515,26 @@ def route(handler, method):
 
     if path == "/music-service/connect" and method == "GET":
         return hresp(handler, 200, cm_music_service.connection_page(base_url(handler)))
+
+    if path == "/bilibili/capabilities" and method == "GET":
+        return jresp(handler, 200, {"catalog": bool(cm_bilibili.base()), "playback": cm_bilibili.playback_enabled()})
+
+    bili_operation = re.fullmatch(r"/bilibili/v1/([a-z.]{3,64})", path)
+    if bili_operation and method == "POST":
+        name = bili_operation[1]
+        uid = require_user(handler, allow_query=False)["id"] if name.startswith("playback.") else 0
+        return jresp(handler, 200, cm_bilibili.operation(name, body, uid, base_url(handler)), cache_control="no-store")
+
+    bili_media = re.fullmatch(r"/bilibili/media/([A-Za-z0-9_-]{32})", path)
+    if bili_media and method == "GET":
+        return cm_bilibili.stream(handler, bili_media[1])
+
+    bili_admin = re.fullmatch(r"/admin/bilibili/(status|settings|candidates|link)", path)
+    if bili_admin and method == ("GET" if bili_admin[1] == "status" else "POST"):
+        account = require_user(handler, allow_query=False)
+        if role_rank(account) < 0:
+            raise ApiError(403, "需要管理员权限")
+        return jresp(handler, 200, cm_bilibili.admin(bili_admin[1], body, account["id"]), cache_control="no-store")
 
     if path == "/kugou/capabilities" and method == "GET":
         return jresp(handler, 200, {"catalog": bool(cm_kugou.base()), "playback": cm_kugou.playback_enabled()})
@@ -3308,6 +3342,9 @@ def route(handler, method):
             ("GET", "/music-service/connect", "公开", "由流声引擎侧发起外接音乐服务连接"),
             ("POST", "/music-service/v1/{operation}", "按能力", "调用白名单中的音乐能力。详见 /api-docs/reference/guide-music-service-api/"),
             ("GET", "/kugou/capabilities", "公开", "探测酷狗概念版曲库与播放能力。"),
+            ("GET", "/bilibili/capabilities", "公开", "哔哩哔哩曲库与播放能力。"),
+            ("POST", "/bilibili/v1/{operation}", "按能力", "哔哩哔哩搜索、分 P 详情、音轨与 DASH MV。"),
+            ("GET", "/bilibili/media/{ticket}", "播放票据", "哔哩哔哩短时媒体地址，支持 HEAD 和单段 Range。"),
             ("POST", "/kugou/v1/{operation}", "按能力", "酷狗概念版曲库、发现、歌词、评论、音频和 MV 取址、私人漫游和个人音乐库。每日推荐、播放与个人操作使用 CurrentMusic Bearer，写入传 confirm=true。"),
             ("GET", "/kugou/account", "Bearer", "查询当前站内账号的酷狗个人绑定状态。"),
             ("POST", "/kugou/account/code", "Bearer", "发送酷狗绑定验证码。传 mobile。"),
@@ -5220,7 +5257,7 @@ def route(handler, method):
     if path == "/ncm/song/url" and method == "GET":
         # v1.28.33：音源仅限注册用户（其他功能不受影响；游客仍可搜索/浏览/看歌词）。
         # 落雪音源专用令牌仅用于脚本下载和支持的播放取链。
-        require_music_user(handler)
+        music_user = require_music_user(handler)
         """播放地址解析（抗卡顿增强版，见 resolve_play_url）。
 
         参数：``id``（必填）、``level``（默认 auto）、``immerse``（仅 sky）、
@@ -5236,7 +5273,8 @@ def route(handler, method):
         if cn_ip:
             # 诊断：落雪直链走到取链阶段才会打这条（不含令牌），便于排查导入/播放失败。
             log.info("落雪取链 song=%s level=%s", q.get("id"), q.get("level") or "auto")
-        return respond_play_url(handler, q, cn_ip=cn_ip)
+        uid = music_user["id"] if _truthy(q.get("allowBilibili")) and optional_user(handler) else 0
+        return respond_play_url(handler, q, cn_ip=cn_ip, uid=uid)
 
     # ---- 播放卡顿上报 / CDN 边缘健康度（v1.28.23） ----
     # 客户端在卡顿自愈与恢复正常时各报一次，服务端据此在**换线时避开问题边缘**。
@@ -6721,7 +6759,7 @@ class Handler(BaseHTTPRequestHandler):
     def _run(self, method):
         path = self.path.split("?", 1)[0].rstrip("/")
         if path.startswith("/"):
-            cm_usage.note_api("/kugou/media" if path.startswith("/kugou/media/") else path)
+            cm_usage.note_api(path.rsplit("/", 1)[0] if path.startswith(("/kugou/media/", "/bilibili/media/")) else path)
         # HEAD 语义 = 与 GET 同样的响应头、但不带响应体。BaseHTTPRequestHandler 不会自动
         # 抑制响应体，故这里把 wfile 换成一个丢弃写入的包装（Content-Length 仍如实声明）。
         if method == "HEAD":
@@ -6751,10 +6789,12 @@ class Handler(BaseHTTPRequestHandler):
             jresp(self, 502, {"error": str(e)})
         except cm_qq.Error as e:
             jresp(self, e.status, e.body)
+        except cm_bilibili.Error as e:
+            jresp(self, e.status, {"error": str(e), "code": e.code}, cache_control="no-store")
         except Exception as e:  # noqa: BLE001
-            if urlparse(self.path).path.startswith("/kugou/"):
-                log.error("酷狗网关内部错误 %s", type(e).__name__)
-                jresp(self, 500, {"error": "酷狗音乐网关内部错误"})
+            if urlparse(self.path).path.startswith(("/kugou/", "/bilibili/", "/admin/bilibili/")):
+                log.error("音乐网关内部错误 %s", type(e).__name__)
+                jresp(self, 500, {"error": "音乐网关内部错误"})
             elif cm_qq.is_path(urlparse(self.path).path):
                 log.error("QQ 网关内部错误 %s", type(e).__name__)
                 jresp(self, 500, {"error": "QQ 音乐网关内部错误"})
@@ -6791,6 +6831,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path.rstrip("/")
         qq = cm_qq.is_path(path)
         headers = "Authorization,Content-Type"
+        if path.startswith("/bilibili/media/"):
+            headers += ",Range"
         if qq:
             headers += ",X-QQ-Session"
         elif path.startswith("/feedback/") and "/media/" in path:
@@ -6805,7 +6847,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_request(self, code="-", size="-"):
         path = getattr(self, "path", "").split("?", 1)[0].rstrip("/")
-        if path.startswith("/kugou/media/"):
+        if path.startswith(("/kugou/media/", "/bilibili/media/")):
             return
         if cm_qq.is_path(path):
             entry = cm_qq_registry.match(path[len(cm_qq_registry.PREFIX):])
@@ -6815,7 +6857,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):  # 精简访问日志
         path = getattr(self, "path", "").split("?", 1)[0]
-        if path.startswith("/kugou/media/") or cm_qq.is_path(path):
+        if path.startswith(("/kugou/media/", "/bilibili/media/")) or cm_qq.is_path(path):
             return
         log.info("%s %s %s", self.client_address[0], self.command, path)
 

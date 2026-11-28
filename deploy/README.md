@@ -209,3 +209,7 @@ curl -fsS http://127.0.0.1:3010/health
 curl -fsS http://127.0.0.1:3015/health   # if LDDC is installed
 curl -fsS http://127.0.0.1:3010/station/api-catalog | head
 ```
+
+### Bilibili
+
+The TZFC Bilibili adapter runs in a separate Python environment on `127.0.0.1:3202`. Install `bilibili-api.service` and provision the server session using the QR login command in the [Bilibili API guide](../docs/bilibili-api.md).

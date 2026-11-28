@@ -38,6 +38,8 @@
 
 QQ 音乐的公开曲库、歌词和登录规则见接入指南。[QQ 音乐接入](qq-music-api.md)
 
+哔哩哔哩支持搜索、按分 P 取音轨和 DASH MV。[哔哩哔哩 API](bilibili-api.md)
+
 [机器可读能力目录](/api-docs/music-service-capabilities.json)列出了每项的支持平台、权限及部署开关。[OpenAPI](/api-docs/music-service.openapi.json)描述传输接口。
 
 ## 用户授权

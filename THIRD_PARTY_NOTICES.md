@@ -133,3 +133,8 @@ be imported without installing the Qt GUI stack.
   not grant rights to the images referenced by it. User uploads, avatars,
   music/audio, covers, and third-party service responses are not licensed by
   CurrentMusic's MIT license and are not included in the source snapshot.
+
+- **TZFC/bilibili-api** (GPL-3.0) is a separate locally installed API service. Its code
+  is obtained from the [upstream fork](https://github.com/TZFC/bilibili-api) and is not bundled with CurrentMusic.
+- **dash.js 5.3.0** (BSD-3-Clause) is distributed with the Web player. See the
+  [Dash Industry Forum license](web/vendor/dashjs-LICENSE.md).

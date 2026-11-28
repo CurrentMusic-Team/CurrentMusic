@@ -7,6 +7,7 @@ import re
 from urllib.parse import urlencode, urlsplit
 
 import cm_db
+import cm_bilibili
 import cm_kugou
 import cm_kugou_account
 import cm_kugou_catalog
@@ -62,14 +63,17 @@ def descriptor(origin):
     client = app(origin)
     usable_scopes = set(cm_passport.scope_names(client["scopes"])) if client else set()
     platforms = {}
-    for provider in ("netease", "qqmusic", "kugou"):
+    for provider in ("netease", "qqmusic", "kugou", "bilibili"):
         if provider == "qqmusic" and not cm_qq.BASE:
             continue
         if provider == "kugou" and not cm_kugou.base():
             continue
+        if provider == "bilibili" and not cm_bilibili.base():
+            continue
         platforms[provider] = [
             {"id": key, "label": op.label, "scope": op.scope or None, "write": op.write,
-             **({"kinds": list(cm_kugou_catalog.SEARCH_TYPES)} if provider == "kugou" and key == "catalog.search" else {})}
+             **({"kinds": list(cm_kugou_catalog.SEARCH_TYPES)} if provider == "kugou" and key == "catalog.search" else {}),
+             **({"kinds": ["song", "mv"]} if provider == "bilibili" and key == "catalog.search" else {})}
             for key, op in OPERATIONS.items()
             if provider in op.providers and operation_enabled(provider, op) and (not op.scope or op.scope in usable_scopes)
         ]
@@ -444,11 +448,11 @@ def cloud(_provider, data, uid, ip):
 
 BOTH = ("netease", "qqmusic")
 OPERATIONS = {
-    "catalog.search": Operation("搜索", search, providers=(*BOTH, "kugou")),
-    "catalog.track": Operation("歌曲详情", details("song"), providers=(*BOTH, "kugou")),
+    "catalog.search": Operation("搜索", search, providers=(*BOTH, "kugou", "bilibili")),
+    "catalog.track": Operation("歌曲详情", details("song"), providers=(*BOTH, "kugou", "bilibili")),
     "catalog.podcast": Operation("有声节目详情", None, providers=("kugou",)),
     "discover.podcasts": Operation("发现有声节目", None, providers=("kugou",)),
-    "catalog.video": Operation("MV 详情", None, providers=("kugou",)),
+    "catalog.video": Operation("MV 详情", None, providers=("kugou", "bilibili")),
     "catalog.album": Operation("专辑", details("album"), providers=(*BOTH, "kugou")),
     "catalog.artist": Operation("歌手", details("artist"), providers=(*BOTH, "kugou")),
     "catalog.playlist": Operation("公开歌单", details("playlist"), providers=(*BOTH, "kugou")),
@@ -466,9 +470,9 @@ OPERATIONS = {
     "track.comments": Operation("歌曲评论", comments, providers=("netease", "kugou")),
     "track.comment.replies": Operation("歌曲评论楼层", None, providers=("kugou",)),
     "track.comment.add": Operation("发表评论", comment_add, "music.comment.write", providers=("netease", "kugou"), write=True),
-    "playback.qualities": Operation("音质档位", qualities, "music.play", providers=("netease", "kugou"), media="playback"),
-    "playback.resolve": Operation("播放取址", play, "music.play", providers=("netease", "kugou"), media="playback"),
-    "playback.mv": Operation("MV 取址", mv, "music.play", providers=("netease", "kugou"), media="mv"),
+    "playback.qualities": Operation("音质档位", qualities, "music.play", providers=("netease", "kugou", "bilibili"), media="playback"),
+    "playback.resolve": Operation("播放取址", play, "music.play", providers=("netease", "kugou", "bilibili"), media="playback"),
+    "playback.mv": Operation("MV 取址", mv, "music.play", providers=("netease", "kugou", "bilibili"), media="mv"),
     "playback.download": Operation("下载取址", download, "music.download", media="download"),
     "library.favorites": Operation("收藏", favorites, "music.library.read", providers=("netease", "kugou")),
     "library.favorite.status": Operation("查询收藏状态", None, "music.library.read", providers=("kugou",)),
@@ -574,6 +578,8 @@ def principal(header, scope):
 
 
 def operation_enabled(provider, entry):
+    if provider == "bilibili":
+        return bool(cm_bilibili.base()) and (not entry.media or cm_bilibili.playback_enabled())
     if provider == "kugou":
         if entry.scope in ("music.comment.write", "music.cloud.read"):
             return cm_kugou_account.enabled()
@@ -677,7 +683,12 @@ def kugou_operation(operation, data, uid, origin):
     if operation == "playback.qualities":
         return cm_kugou.qualities(ident)
     if operation == "playback.resolve":
-        return cm_kugou.resolve(ident, string(data, "quality", 16, default="auto"), uid, origin)
+        quality = string(data, "quality", 16, default="auto")
+        if quality == 'auto' and data.get('supportsDolby') is True:
+            alternate = cm_bilibili.linked_dolby('kugou', ident, uid, origin)
+            if alternate:
+                return alternate
+        return cm_kugou.resolve(ident, quality, uid, origin)
     error(404, "unsupported_operation", "该服务未开放此酷狗能力")
 
 
@@ -697,8 +708,21 @@ def dispatch(operation, body, header, ip, *, origin=""):
     try:
         if provider == "kugou":
             return kugou_operation(operation, data, uid, origin)
+        if provider == "bilibili":
+            return cm_bilibili.operation(operation, data, uid, origin)
+        if (provider == "netease" and operation == "playback.resolve" and cm_bilibili.playback_enabled()
+                and data.get('supportsDolby') is True and data.get('quality', 'auto') == 'auto'):
+            try:
+                native = play(provider, {**data, 'quality': 'dolby'}, uid, ip)
+                if native.get('quality') == 'dolby':
+                    return native
+            except (Error, cm_ncm.NcmError):
+                pass
+            alternate = cm_bilibili.linked_dolby('netease', ncm_id(data), uid, origin)
+            if alternate:
+                return alternate
         return entry.run(provider, data, uid, ip)
-    except cm_kugou.Error as exc:
+    except (cm_kugou.Error, cm_bilibili.Error) as exc:
         error(exc.status, exc.code, str(exc))
     except cm_qq.Error as exc:
         error(exc.status, "upstream_error", exc.body["error"])
