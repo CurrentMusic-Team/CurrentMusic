@@ -12,6 +12,7 @@ import time
 
 _PATH = "/repos/bileizhen/CurrentMusicX/releases?per_page=100"
 _CACHE_SECONDS = 60
+_STALE_SECONDS = 3600
 _MAX_BYTES = 4 * 1024 * 1024
 _CI_TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+-ci\.[1-9][0-9]*")
 log = logging.getLogger(__name__)
@@ -35,21 +36,24 @@ class CIReleaseCache:
         self._releases = None
         self._etag = None
         self._refresh_at = 0
-        self._available = False
+        self._stale_until = 0
 
     def get(self):
         # The backend uses one process with several request threads. Holding the
         # lock through refresh also shares upstream failures among waiting clients.
         with self._lock:
-            if time.monotonic() >= self._refresh_at:
-                delay = _CACHE_SECONDS
+            now = time.monotonic()
+            if now >= self._refresh_at:
                 try:
-                    self._available, delay = self._refresh()
+                    refreshed, delay = self._refresh()
                 except (OSError, http.client.HTTPException, ValueError, RecursionError) as exc:
-                    self._available = False
+                    refreshed, delay = False, _CACHE_SECONDS
                     log.warning("CurrentMusicX CI release refresh failed (%s)", type(exc).__name__)
-                self._refresh_at = time.monotonic() + delay
-            return self._releases if self._available else None
+                now = time.monotonic()
+                self._refresh_at = now + delay
+                if refreshed:
+                    self._stale_until = now + _STALE_SECONDS
+            return self._releases if now < self._stale_until else None
 
     def _refresh(self):
         headers = {
