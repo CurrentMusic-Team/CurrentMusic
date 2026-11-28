@@ -1,5 +1,6 @@
 // UI 工具：转义、toast、时长格式、歌曲行渲染（含点赞/收藏状态）、对话框封装。
 import { isKugouSong } from './kugou.js';
+import { musicPlatform } from './music-platform.js';
 import { favoriteKey, favoriteStates, libraryCall, libraryPreferences, trackRef } from './library-v2.js';
 import { mdui } from './md.js';
 import { api, auth, decorScale, settings } from './api.js';
@@ -671,7 +672,7 @@ export async function songListHTML(songs, { removable = false, offset = 0, likeS
           ? s.lyricContext.map(line => line.matched ? `<mark>${esc(line.txt)}</mark>` : `<span>${esc(line.txt)}</span>`).join('')
           : `<span>${esc(s.lyric || s.lyricMatch || '')}</span>`}</div>` : ''}
       </div>
-      ${s.mv ? `<button type="button" class="cm-song-mv" data-act="mv" data-i="${offset + i}" title="播放 MV" aria-label="播放 MV"><span class="material-icons-outlined" aria-hidden="true">smart_display</span></button>` : ''}
+      ${s.mv || musicPlatform() === 'bilibili' ? `<button type="button" class="cm-song-mv" data-act="mv" data-i="${offset + i}" title="播放 MV" aria-label="播放 MV"><span class="material-icons-outlined" aria-hidden="true">smart_display</span></button>` : ''}
       <span class="cm-song-dur">${fmtDur(s.duration)}</span>
       <span class="cm-song-like ${liked ? 'on' : ''}" data-act="like" data-i="${offset + i}" title="加入我喜欢">
         <span class="material-icons-outlined">${liked ? 'favorite' : 'favorite_border'}</span>

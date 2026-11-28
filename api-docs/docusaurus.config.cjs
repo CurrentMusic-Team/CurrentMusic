@@ -25,6 +25,7 @@ module.exports = {
       {type:'dropdown',label:'音乐平台',position:'left',items:[
         {to:'/reference/guide-netease-music-api',label:'网易云音乐 API'},
         {to:'/reference/guide-kugou-concept-api',label:'酷狗概念版 API'},
+        {to:'/reference/guide-bilibili-api',label:'哔哩哔哩 API'},
       ]},
       {to:'/usage',label:'服务用量',position:'left'},
       {href:'https://music.20110208.xyz/app/auto',label:'线路测速',position:'left'},

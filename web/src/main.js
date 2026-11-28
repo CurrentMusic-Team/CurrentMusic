@@ -54,6 +54,7 @@ initAimoDialogMotion();
 import { applyTheme } from './pages/settings.js';
 
 import * as home from './pages/home.js';
+import * as bilibiliPage from './pages/bilibili.js';
 import * as levels from './pages/levels.js';
 import * as search from './pages/search.js';
 import * as kugouMusic from './pages/kugou.js';
@@ -111,6 +112,7 @@ const ROUTES = [
   { re: /^#\/levels$/, page: levels, title: '积分与升级规则' },
   { re: /^#\/levels\/trial$/, page: levels, title: '通过试炼', fixed: ['trial'] },
   { re: /^#\/search$/, page: search, title: '搜索' },
+  { re: /^#\/bilibili\/mv\/(BV[0-9A-Za-z]{10}:[1-9][0-9]{0,17})$/, page: bilibiliPage, title: '哔哩哔哩 MV' },
   { re: /^#\/kugou(?:\/([a-f0-9]{32}-[1-9][0-9]{0,14}))?$/, page: kugouMusic, title: '酷狗音乐' },
   { re: /^#\/kugou\/(album|artist|playlist)\/([a-zA-Z0-9_]{1,80})$/, page: playlist, title: '酷狗概念版',
     fixed: m => ['kugou-' + m[1], m[2]] },

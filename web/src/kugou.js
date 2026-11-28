@@ -42,10 +42,14 @@ export function kugouSong(item) {
     mv: /^[a-f0-9]{32}$/.test(item.videoId || '') ? item.videoId : '' };
 }
 
-export async function resolveKugouSong(song, level) {
+export async function resolveKugouSong(song, level, supportsDolby = false) {
   try {
     const quality = KUGOU_QUALITIES.some(item => item.key === level) ? level : kugouQuality();
-    const result = await kugouRequest('playback.resolve', { id: song.kugou_id, quality });
+    const result = await kugouRequest('playback.resolve', { id: song.kugou_id, quality, supportsDolby });
+    if (result.provider === 'bilibili') {
+      const { bilibiliMediaUrl } = await import('./bilibili.js');
+      return { ...result, url: bilibiliMediaUrl(result.url), level: 'dolby', type: result.format, br: result.bitrate, autoSpatial: 'dolby' };
+    }
     return { url: kugouMediaUrl(result.url), provider: 'kugou', level: result.quality, type: result.format, br: result.bitrate };
   } catch (error) {
     error.noAutoNext = true;

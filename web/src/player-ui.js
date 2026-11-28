@@ -1,4 +1,5 @@
 import { isKugouSong, kugouQuality, kugouRequest, KUGOU_QUALITIES } from './kugou.js';
+import { bilibiliQuality, bilibiliRequest, BILIBILI_QUALITIES, isBilibiliSong } from './bilibili.js';
 // 播放器 UI：底部迷你条 + 全屏播放页（封面/歌词/进度/音质/点赞/收藏/加入歌单）。
 import { allLibraryItems, libraryCall, libraryPreferences, platformLabels, trackRef, writePlaylist } from './library-v2.js';
 import { mdui } from './md.js';
@@ -300,7 +301,7 @@ async function loadLyric() {
   pushDesktopLyric(-1, true);
   let data;
   try {
-    data = isKugouSong(player.meta) ? await kugouRequest('track.lyrics', { id: player.meta.kugou_id }) : await api.lyric(id, autoLyrics);
+    data = isBilibiliSong(player.meta) ? { lines: [] } : isKugouSong(player.meta) ? await kugouRequest('track.lyrics', { id: player.meta.kugou_id }) : await api.lyric(id, autoLyrics);
     if (!Array.isArray(data?.lines)) throw new Error('歌词格式无效');
   } catch {
     request.failed = true;
@@ -1352,7 +1353,7 @@ async function loadStats() {
   if (!m) return;
   const el = document.getElementById('plStats');
   if (!el) return;
-  if (isKugouSong(m)) { if (el) el.innerHTML = ''; return; }
+  if (isKugouSong(m) || isBilibiliSong(m)) { if (el) el.innerHTML = ''; return; }
   let pop = m.pop || 0, comments = null, count = getStatus(m.ncm_id).count;
   try {
     const d = await api.songDetail([m.ncm_id]);
@@ -1746,7 +1747,11 @@ window.addEventListener('cm-likechange', event => {
 });
 
 function syncKugouControls(ov, track) {
-  const display = isKugouSong(track) ? 'none' : '';
+  const display = isKugouSong(track) || isBilibiliSong(track) ? 'none' : '';
+  for (const id of ['plAdd', 'plLike', 'plStar', 'plHeart', 'plComments']) {
+    const node = ov.querySelector('#' + id);
+    if (node) node.style.display = isBilibiliSong(track) ? 'none' : '';
+  }
   for (const id of ['plAskAi', 'plCast', 'plCastSlot']) {
     const control = ov.querySelector('#' + id);
     if (control) control.style.display = display;
@@ -1781,7 +1786,17 @@ function paintQuality() {
   if (!q) return;
   const info = player.urlInfo;
   const metric = isKugouSong(player.meta) && info?.type ? info.type.toUpperCase() + (info.br ? ` · ${Math.round(info.br / 1000)} kbps` : '') : '';
-  const txt = player.urlInfo ? metric || tierLabel(player.urlInfo.level) : tierLabel(settings.quality);
+  const bili = info?.provider === 'bilibili';
+  const txt = bili ? `哔哩哔哩 · ${info.level === 'dolby' ? '杜比全景声' : 'AAC'}`
+    : player.urlInfo ? metric || tierLabel(player.urlInfo.level) : tierLabel(isBilibiliSong(player.meta) ? bilibiliQuality() : settings.quality);
+  q.title = bili ? info.sourceTitle || '哔哩哔哩' : '播放音质';
+  let source = q.parentElement.querySelector('[data-bilibili-version]');
+  if (bili && !source) {
+    source = document.createElement('small');
+    source.dataset.bilibiliVersion = '';
+    q.after(source);
+  }
+  if (source) { source.textContent = bili ? info.sourceTitle || '' : ''; source.hidden = !bili; }
   const label = q.querySelector('.lp-quality__label');
   if (label) label.textContent = txt; else q.textContent = txt;
 }
@@ -1808,14 +1823,16 @@ on('state', () => {
 
 async function qualityMenu() {
   const kugou = isKugouSong(player.meta);
-  const cur = kugou ? kugouQuality() : settings.quality;
+  const bili = isBilibiliSong(player.meta);
+  const cur = bili ? bilibiliQuality() : kugou ? kugouQuality() : settings.quality;
   let tiers = QUALITY_TIERS;
-  if (kugou) {
+  if (bili || kugou) {
     const track = player.meta;
     try {
-      const available = await kugouRequest('playback.qualities', { id: track.kugou_id });
+      const available = bili ? await bilibiliRequest('playback.qualities', { id: track.bilibili_id })
+        : await kugouRequest('playback.qualities', { id: track.kugou_id });
       if (player.meta !== track) return;
-      tiers = KUGOU_QUALITIES.filter(item => item.key === 'auto' || available.levels?.includes(item.key));
+      tiers = (bili ? BILIBILI_QUALITIES : KUGOU_QUALITIES).filter(item => item.key === 'auto' || available.levels?.includes(item.key));
     } catch (error) { if (player.meta === track) toast(error.message); return; }
   }
   const items = tiers.map(t =>

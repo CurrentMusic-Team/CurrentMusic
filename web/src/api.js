@@ -465,6 +465,7 @@ export const api = {
     if (immerse) qs += '&immerse=' + immerse;
     if (o.maxBr) qs += '&maxBr=' + o.maxBr;
     if (level === 'auto' && o.supportsDolby) qs += '&supportsDolby=1';
+    if (level === 'auto' && o.allowBilibili) qs += '&allowBilibili=1';
     if (level === 'auto' && o.supportsVivid === false) qs += '&supportsVivid=0';
     if (o.refresh) qs += '&refresh=1';
     if (o.alts) qs += '&alts=1';

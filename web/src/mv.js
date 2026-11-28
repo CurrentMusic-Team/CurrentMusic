@@ -1,5 +1,7 @@
 // MV 详情页和歌曲行浮层共用播放器，歌曲行通过事件传入数据。
 import { api } from './api.js';
+import { bilibiliMediaUrl, bilibiliRequest, isBilibiliSong, loadDash, originalVideoUrl, supportsBilibiliDolby } from './bilibili.js';
+import { musicPlatform } from './music-platform.js';
 import { isKugouSong, kugouMediaUrl, kugouRequest } from './kugou.js';
 import { esc, toast } from './ui.js';
 import { on, player } from './player.js';
@@ -8,7 +10,7 @@ import './mv.css';
 let modal = null;
 let activeVideo = null;
 
-export function mountMvPlayer(stage, { id, title, cover, autoplay = false, provider }) {
+export function mountMvPlayer(stage, { id, title, cover, autoplay = false, provider, linkedTrack, original = '' }) {
   stage.innerHTML = `
     <video class="cm-mv-video" aria-label="${esc(title)}" playsinline preload="metadata"${cover ? ` poster="${esc(cover)}"` : ''}></video>
     <span class="cm-mv-quality" hidden></span>
@@ -17,6 +19,7 @@ export function mountMvPlayer(stage, { id, title, cover, autoplay = false, provi
       <div class="cm-mv-status" role="status"><span class="cm-play-spinner" aria-hidden="true"></span><span></span></div>
       <button type="button" class="cm-mv-retry" hidden>重新加载</button>
       <a class="cm-mv-login" href="#/user" hidden>去登录</a>
+      <a class="cm-mv-original" target="_blank" rel="noopener noreferrer" hidden>在哔哩哔哩打开</a>
     </div>`;
   const video = stage.querySelector('video');
   const quality = stage.querySelector('.cm-mv-quality');
@@ -24,9 +27,17 @@ export function mountMvPlayer(stage, { id, title, cover, autoplay = false, provi
   const status = stage.querySelector('.cm-mv-status');
   const retry = stage.querySelector('.cm-mv-retry');
   const login = stage.querySelector('.cm-mv-login');
+  const originalLink = stage.querySelector('.cm-mv-original');
   const spinner = status.firstElementChild;
   const message = status.lastElementChild;
-  let disposed = false;
+  let disposed = false, dash = null, epoch = 0, expiry = 0, enhanced = false, renewing = false;
+  let running = false;
+  const setOriginal = url => {
+    if (!url) return;
+    originalLink.href = url;
+    originalLink.hidden = false;
+  };
+  setOriginal(original || originalVideoUrl(id));
   const active = () => !disposed && stage.isConnected;
 
   function paint(text, action = '') {
@@ -41,6 +52,9 @@ export function mountMvPlayer(stage, { id, title, cover, autoplay = false, provi
   function unload() {
     if (activeVideo === video) activeVideo = null;
     video.pause();
+    const previous = dash;
+    dash = null;
+    if (previous) previous.reset();
     video.controls = false;
     video.removeAttribute('src');
     video.load();
@@ -51,19 +65,66 @@ export function mountMvPlayer(stage, { id, title, cover, autoplay = false, provi
     try { await video.play(); }
     catch {
       // 系统禁止自动播放时，保留原生控件和居中的播放按钮。
-      if (active() && video.paused && !video.error && video.hasAttribute('src')) paint('');
+      if (active() && video.paused && !video.error && (dash || video.hasAttribute('src'))) paint('');
     }
   }
 
-  async function load(shouldPlay) {
-    if (video.hasAttribute('src')) unload();
+  function onDashError(request) {
+    if (!active() || request !== epoch || !dash) return;
+    const position = video.currentTime || 0;
+    const shouldPlay = running || !video.paused;
+    if (!renewing && Date.now() >= expiry - 10_000) void load(shouldPlay, !enhanced, position, true);
+    else if (enhanced) void load(shouldPlay, true, position);
+    else {
+      ++epoch;
+      unload();
+      paint('视频播放失败，请重新加载', 'retry');
+    }
+  }
+
+  async function load(shouldPlay, standard = false, position = 0, refresh = false) {
+    const request = ++epoch;
+    if (dash || video.hasAttribute('src')) unload();
+    running = shouldPlay;
+    renewing = refresh;
+    enhanced = false;
     paint('正在获取播放地址…');
     try {
+      if (provider === 'bilibili') {
+        const mediaSource = window.MediaSource || window.ManagedMediaSource;
+        const data = await bilibiliRequest('playback.mv', {
+          id, linkedTrack, supportsDolby: !standard && supportsBilibiliDolby(), supportsDolbyVision: !standard,
+        });
+        if (!active() || request !== epoch) return;
+        setOriginal(originalVideoUrl(data.id, data.page));
+        if (!mediaSource) throw new Error('当前浏览器无法播放 DASH 视频');
+        const supported = (kind, codec) => mediaSource.isTypeSupported(`${kind}/mp4; codecs="${codec}"`);
+        if (!data.videoCodecs?.some(codec => supported('video', codec)) || !supported('audio', data.audioCodec)) {
+          if (!standard) { void load(shouldPlay, true, position); return; }
+          throw new Error('当前浏览器不支持该视频编码');
+        }
+        const library = await loadDash();
+        if (!active() || request !== epoch) return;
+        dash = library.MediaPlayer().create();
+        expiry = Date.now() + data.expiresIn * 1000;
+        enhanced = data.dolbyVision || data.audioCodec === 'ec-3';
+        quality.textContent = data.dolbyVision ? '杜比视界' : '';
+        quality.hidden = !data.dolbyVision;
+        video.controls = true;
+        dash.on(library.MediaPlayer.events.ERROR, () => onDashError(request));
+        dash.on(library.MediaPlayer.events.STREAM_INITIALIZED, () => {
+          if (!active() || request !== epoch) return;
+          paint('');
+          if (shouldPlay) void play();
+        });
+        dash.initialize(video, bilibiliMediaUrl(data.url), false, position);
+        return;
+      }
       // 上游可降级返回，清晰度以响应中的 r 为准。
       const data = provider === 'kugou'
         ? await kugouRequest('playback.mv', { id })
         : (await api.ncm('/mv/url', { id, r: 1080 })).data;
-      if (!active()) return;
+      if (!active() || request !== epoch) return;
       if (!data?.url) throw new Error('暂无播放地址，可能受版权或地区限制');
       video.src = provider === 'kugou' ? kugouMediaUrl(data.url) : data.url;
       video.controls = true;
@@ -76,7 +137,8 @@ export function mountMvPlayer(stage, { id, title, cover, autoplay = false, provi
       paint(shouldPlay ? '正在载入视频…' : '');
       if (shouldPlay) void play();
     } catch (error) {
-      if (!active()) return;
+      if (!active() || request !== epoch) return;
+      if (dash) { ++epoch; unload(); }
       if (error.status === 401) paint('登录 CurrentMusic 后即可观看', 'login');
       else paint(error.message || '播放地址获取失败', 'retry');
     }
@@ -86,6 +148,7 @@ export function mountMvPlayer(stage, { id, title, cover, autoplay = false, provi
   retry.onclick = () => { void load(true); };
   video.onplay = () => {
     if (!active() || video.paused) return;
+    running = true;
     if (activeVideo && activeVideo !== video) activeVideo.pause();
     if (player.isPlaying() || player.playPending) player.pause();
     activeVideo = video;
@@ -94,11 +157,14 @@ export function mountMvPlayer(stage, { id, title, cover, autoplay = false, provi
   video.onwaiting = () => { if (active() && !video.paused) paint('正在缓冲…'); };
   video.onplaying = () => { if (active()) paint(''); };
   video.onpause = () => {
+    if (!video.error) running = false;
     if (activeVideo === video && video.paused) activeVideo = null;
-    if (active() && video.paused && !video.error && video.hasAttribute('src')) paint('');
+    if (active() && video.paused && !video.error && (dash || video.hasAttribute('src'))) paint('');
   };
   video.onerror = () => {
-    if (!active() || !video.hasAttribute('src')) return;
+    if (!active()) return;
+    if (dash) { onDashError(epoch); return; }
+    if (provider === 'bilibili' || !video.hasAttribute('src')) return;
     unload();
     paint('视频播放失败，请重新加载', 'retry');
   };
@@ -132,7 +198,11 @@ export function closeMv() {
 }
 
 export function openMv(song) {
-  if (!song?.mv) { toast('这首歌没有 MV'); return; }
+  const selected = musicPlatform();
+  const provider = isBilibiliSong(song) || selected === 'bilibili' ? 'bilibili' : isKugouSong(song) ? 'kugou' : 'netease';
+  const linkedTrack = provider === 'bilibili' && !isBilibiliSong(song) && song?.ncm_id
+    ? { provider: isKugouSong(song) ? 'kugou' : 'netease', id: String(song.kugou_id || song.ncm_id) } : undefined;
+  if (!song?.mv && !linkedTrack) { toast('这首歌没有 MV'); return; }
   if (!modal) {
     const overlay = document.createElement('div');
     overlay.className = 'cm-mv-overlay';
@@ -164,7 +234,7 @@ export function openMv(song) {
   artist.textContent = song.artists || '';
   artist.hidden = !song.artists;
   modal.dispose = mountMvPlayer(modal.overlay.querySelector('.cm-mv-stage'), {
-    id: song.mv, title, cover: song.pic, autoplay: true, provider: isKugouSong(song) ? 'kugou' : 'netease',
+    id: linkedTrack ? undefined : song.mv, title, cover: song.pic, autoplay: true, provider, linkedTrack,
   });
   modal.close.focus();
 }
