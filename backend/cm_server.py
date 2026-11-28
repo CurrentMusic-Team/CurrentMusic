@@ -3342,7 +3342,7 @@ def route(handler, method):
             ("POST", "/auth/logout", "Bearer", "退出当前设备并撤销会话"),
             ("GET", "/auth/me", "Bearer", "当前账户资料与统计（含 bannerUrl、累计积分 points 和等级 level，视频横幅另含 bannerType）"),
             ("GET", "/profile", "Bearer", "当前账户资料与统计（bannerUrl 为 API 基址相对路径，空串表示未设置，视频横幅另含 bannerType）"),
-            ("PUT", "/profile/banner", "Bearer", "上传或替换 3∶2 主页横幅。普通图片使用 Base64 JSON；站长、超管和管理员可用原图和 crop 参数无损裁切。MP4/MOV 最大 16 MiB，普通账号最长 5 秒，站长、超管或管理员最长 10 秒。视频保留首条音轨，返回 bannerUrl 和 bannerType"),
+            ("PUT", "/profile/banner", "Bearer", "上传或替换 3∶2 主页横幅。普通图片使用 Base64 JSON，视频限无音轨且最长 5 秒。站长、超管、管理员或 Lv.3 及以上用户可用原图和 crop 参数无损裁切，也可上传最长 10 秒的视频并保留首条音轨。MP4/MOV 最大 16 MiB，视频返回 bannerUrl 和 bannerType"),
             ("DELETE", "/profile/banner", "Bearer", "移除自己的公开主页横幅，返回空 bannerUrl"),
             ("GET", "/auth/sessions", "Bearer", "在线设备列表 {max:null,sessions}；数量不限，超过 5 台时客户端提示风险"),
             ("DELETE", "/auth/sessions/{id}", "Bearer", "下线指定设备"),
@@ -4037,10 +4037,11 @@ def route(handler, method):
 
     if path == "/profile/banner" and method == "PUT":
         u = require_user(handler, allow_query=False)
+        privileged = role_rank(u) >= 0 or u["level"] >= cm_profile_banner.PRIVILEGE_LEVEL
         upload_type = handler.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if upload_type in cm_profile_banner.IMAGE_FORMATS:
-            if role_rank(u) < 0:
-                raise ApiError(403, "无损横幅仅限站长、超管和管理员")
+            if not privileged:
+                raise ApiError(403, f"无损横幅仅限{cm_profile_banner.PRIVILEGED_USERS}")
             try:
                 data = cm_profile_banner.upload_lossless_image(handler, upload_type, q.get("crop"))
             except cm_feedback_media.MediaError as exc:
@@ -4048,7 +4049,7 @@ def route(handler, method):
             content_type = "image/png"
         elif upload_type in cm_profile_banner.VIDEO_TYPES:
             try:
-                data = cm_profile_banner.upload_video(handler, extended=role_rank(u) >= 0)
+                data = cm_profile_banner.upload_video(handler, privileged=privileged)
             except cm_feedback_media.MediaError as exc:
                 raise ApiError(exc.status, str(exc)) from exc
             content_type = "video/mp4"

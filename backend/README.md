@@ -31,7 +31,7 @@ CurrentMusic 的自托管后端：账号体系、网易云音乐代理、播放�
 - 可选：
   - Pillow + segno + Noto Sans CJK：分享图渲染（缺失时 `/share/song/{id}/image` 返回 503）；
     可执行 `pip install -r deploy/requirements-optional.txt`，并安装 Noto CJK 字体
-  - Pillow：个人主页图片横幅解码与 3∶2 裁切，站长、超管和管理员可上传原图进行无损裁切。FFmpeg（带 `libx264`）和 ffprobe：个人主页视频横幅校验与转码，普通账号最长 5 秒，站长、超管和管理员最长 10 秒。相应组件缺失时上传返回 503。
+  - Pillow：个人主页图片横幅解码与 3∶2 裁切。FFmpeg（带 `libx264`）和 ffprobe：个人主页视频横幅校验与转码。站长、超管、管理员或 Lv.3 及以上用户可上传无损图片及最长 10 秒的有声视频，其他用户可上传压缩图片或最长 5 秒的无音轨视频。相应组件缺失时上传返回 503。
   - SMTP：邮箱验证码
   - 短信 webhook：手机验证码
   - z.ai 与 DeepSeek API key：AI 助手

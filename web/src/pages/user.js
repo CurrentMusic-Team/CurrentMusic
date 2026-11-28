@@ -648,7 +648,7 @@ async function renderProfile(el, autoDecor) {
     import('../ncmbind.js').then(m => m.unbindFlow(() => renderProfile(el)));
   });
 
-  bindProfileBanner(el, u.isOwner || u.isSuper || u.isAdmin);
+  bindProfileBanner(el, u.isOwner || u.isSuper || u.isAdmin || u.level >= 3);
   // 头像上传：点击头像即换（替换原「账号管理 → 更换头像」入口，位置更直观）
   const fileInput = el.querySelector('#avaFile');
   const avaWrap = el.querySelector('#avaWrap');

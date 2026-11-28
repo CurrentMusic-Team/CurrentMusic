@@ -8,14 +8,14 @@
 
 | 方法 | 路径 | 行为 |
 | --- | --- | --- |
-| PUT | `/cm/profile/banner` | 上传或替换横幅。普通图片使用 JSON `{"data":"BASE64_IMAGE"}`，站长、超管或管理员可上传原图做无损裁切，视频使用原始 MP4 或 MOV 文件。返回 `bannerUrl`，视频另返回 `bannerType` |
+| PUT | `/cm/profile/banner` | 上传或替换横幅。普通图片使用 JSON `{"data":"BASE64_IMAGE"}`，视频使用原始 MP4 或 MOV 文件。站长、超管、管理员或 Lv.3 及以上用户可上传无损图片和最长 10 秒的有声视频。返回 `bannerUrl`，视频另返回 `bannerType` |
 | DELETE | `/cm/profile/banner` | 清除当前账号的横幅。重复删除仍返回 `{"bannerUrl":""}` |
 | GET | `/cm/users/{id}/banner` | 公开读取当前横幅，返回 `image/jpeg`、`image/png` 或 `video/mp4`。可用 `v` 指定版本，并使用 ETag 验证。视频支持单段字节范围请求 |
 | HEAD | `/cm/users/{id}/banner` | 查询当前横幅的响应头，包括 `Content-Type`、`Content-Length` 和 `ETag`。可用 `v` 指定版本 |
 
 - Base64 JSON 上传接受 JPEG、PNG、WebP，解码后的文件最多 1 MiB、2500 万像素。服务端按 EXIF 校正方向，居中裁剪为 3∶2 并转成 JPEG，最长边最多 1600 像素。普通账号的 Web 裁切器可选择最大 32 MiB、2500 万像素的原图，拖动和缩放调整取景后，将裁好的 3∶2 图片压缩到 1 MiB 内提交。旧图片仍可读取。
-- 站长、超管和管理员在 Web 裁切器中自动使用无损保存。API 客户端可将静态 JPEG、PNG 或 WebP 原图作为请求体，设置相应的 `Content-Type` 和 `Content-Length`。查询参数 `crop=x,y,width,height` 使用 EXIF 方向校正后的整数像素坐标，从左上角 `(0,0)` 起算。裁切框须完全在图内且比例为 3∶2。原图最多 32 MiB、2500 万像素。服务端保留裁切后的像素尺寸，存为无损 PNG，最大 48 MiB。普通账号尝试此方式返回 403。
-- 视频使用 `Content-Type: video/mp4` 或 `video/quicktime` 并提供 `Content-Length`。普通账号的视频轨最长 5 秒，站长、超管和管理员最长 10 秒。原始文件最多 16 MiB，最长边最多 3840 像素，总像素数最多 8,294,400。服务端校正旋转方向并居中裁剪，输出 720×480 的 H.264 MP4。有声视频的首条音轨以 AAC 保存，音频随画面结束。Web 默认静音循环播放。
+- 站长、超管、管理员或 Lv.3 及以上用户在 Web 裁切器中自动使用无损保存。API 客户端可将静态 JPEG、PNG 或 WebP 原图作为请求体，设置相应的 `Content-Type` 和 `Content-Length`。查询参数 `crop=x,y,width,height` 使用 EXIF 方向校正后的整数像素坐标，从左上角 `(0,0)` 起算。裁切框须完全在图内且比例为 3∶2。原图最多 32 MiB、2500 万像素。服务端保留裁切后的像素尺寸，存为无损 PNG，最大 48 MiB。无权限的账号尝试此方式返回 403。
+- 视频使用 `Content-Type: video/mp4` 或 `video/quicktime` 并提供 `Content-Length`。站长、超管、管理员或 Lv.3 及以上用户可上传最长 10 秒的视频，首条音轨以 AAC 保存，音频随画面结束。其他用户可上传最长 5 秒的无音轨视频，提交含音轨的文件返回 403。原始文件最多 16 MiB，最长边最多 3840 像素，总像素数最多 8,294,400。服务端校正旋转方向并居中裁剪，输出 720×480 的 H.264 MP4。Web 默认静音循环播放。
 
 上传 MP4 示例。请先将自己的 CurrentMusic 会话令牌存入环境变量 `CURRENTMUSIC_TOKEN`。
 
