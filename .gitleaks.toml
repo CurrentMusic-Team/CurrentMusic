@@ -39,6 +39,6 @@ regexes = ['''^_D5jB5uOaa6nq3NIKEbaCTnWzRLa8K__qpouk_v8zzU$''']
 description = "Public DASH Clear Key and common PSSH system identifiers in the pinned dash.js build"
 targetRules = ["generic-api-key"]
 condition = "AND"
-paths = ['''^(?:web/vendor|app/src/main/assets/www)/dashjs-5\.3\.0\.min\.js$''']
+paths = ['''(?:^|/)(?:web/vendor|app/src/main/assets/www)/dashjs-5\.3\.0\.min\.js$''']
 regexTarget = "secret"
 regexes = ['''^(?:e2719d58-a985-b3c9-781a-b030af78d30e|1077efec-c0b2-4d02-ace3-3c1e52e2fb4b)$''']
