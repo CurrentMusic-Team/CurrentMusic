@@ -80,8 +80,8 @@ export function bindProfileBanner(container, privileged = false) {
       body: `<div class="cm-banner-preview">
         <div class="cm-profile-banner cm-profile-banner-custom">${type ? '<video muted loop playsinline controls></video>'
           : '<canvas tabindex="0" aria-label="3 比 2 横幅裁切预览，可拖动或使用方向键取景"></canvas>'}</div>
-        ${type ? `<p>视频会居中裁剪为 3∶2，最长 ${maxVideoSeconds} 秒，发布后公开静音循环播放。</p>` : `
-          <p>拖动图片调整取景，保存后会公开展示。${privileged ? '无损保存会保留裁切后的像素尺寸。' : ''}</p>
+        ${type ? `<p>视频会居中裁剪为 3∶2，最长 ${maxVideoSeconds} 秒。${privileged ? '转码保留首条音轨。' : '当前账号只可上传无音轨视频，升至 Lv.3 可上传有声视频。'}发布后公开静音循环播放。</p>` : `
+          <p>拖动图片调整取景，保存后会公开展示。${privileged ? '无损保存会保留裁切后的像素尺寸。' : '升至 Lv.3 可解锁无损保存。'}</p>
           <div class="cm-banner-crop-controls">
             <label>缩放 <input type="range" min="1" max="3" step=".01" value="1" data-crop-zoom disabled></label>
             <button type="button" data-crop-reset disabled>重置</button>

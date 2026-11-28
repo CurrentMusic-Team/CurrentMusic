@@ -174,7 +174,7 @@ class TestCommunity(unittest.TestCase):
             cm_server.jresp(handler, exc.code, {"error": exc.msg})
         return handler
 
-    def test_lossless_image_banner_preserves_pixels_and_requires_role(self):
+    def test_lossless_image_banner_preserves_pixels_and_requires_eligibility(self):
         try:
             from PIL import Image, ImageDraw, ImageOps
         except ImportError:
@@ -192,11 +192,13 @@ class TestCommunity(unittest.TestCase):
         upload = "/profile/banner?crop=20,30,1800,1200"
         headers = {"Content-Type": "image/png"}
 
-        _, ordinary = self.user("ordinary-banner-uploader")
+        ordinary_id, ordinary = self.user("ordinary-banner-uploader")
+        cm_db.set_progression(ordinary_id, 0, 2)
         self.assertEqual(self.banner_request("PUT", upload, data=source, headers=headers).status, 401)
         self.assertEqual(self.banner_request("PUT", upload, token=ordinary, data=source, headers=headers).status, 403)
 
-        for role, grant in (("owner", cm_db.set_owner), ("super", cm_db.set_super), ("admin", cm_db.set_admin)):
+        for role, grant in (("lv3", lambda uid: cm_db.set_progression(uid, 0, 3)),
+                            ("owner", cm_db.set_owner), ("super", cm_db.set_super), ("admin", cm_db.set_admin)):
             with self.subTest(role=role):
                 uid, token = self.user("lossless-banner-" + role)
                 grant(uid)
@@ -239,6 +241,7 @@ class TestCommunity(unittest.TestCase):
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg unavailable")
     def test_video_banner_normalization_range_and_validation(self):
         uid, token = self.user("video-banner-owner")
+        cm_db.set_progression(uid, 0, 4)
         profile = f"/users/{uid}/profile"
         upload = "/profile/banner"
         source = self.make_banner_clip(5)
@@ -277,7 +280,7 @@ class TestCommunity(unittest.TestCase):
         self.assertEqual(self.banner_request("GET", path, headers={"Range": f"bytes={len(data)}-"}).status, 416)
         self.assertEqual(self.banner_request("GET", path, headers={"If-None-Match": full.response_headers["ETag"]}).status, 304)
 
-        for invalid in (b"not video", self.make_banner_clip(5.25)):
+        for invalid in (b"not video", self.make_banner_clip(10.25)):
             self.assertEqual(self.banner_request("PUT", upload, token=token, data=invalid).status, 400)
         oversized = {"Content-Length": str(cm_profile_banner.VIDEO_BYTES + 1)}
         self.assertEqual(self.banner_request("PUT", upload, token=token, data=b"", headers=oversized).status, 413)
@@ -288,7 +291,8 @@ class TestCommunity(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg unavailable")
     def test_video_banner_audio_follows_picture_duration(self):
-        _, token = self.user("video-banner-audio-duration")
+        uid, token = self.user("video-banner-audio-duration")
+        cm_db.set_progression(uid, 0, 3)
         for audio_seconds in (0, 1, 4):
             with self.subTest(audio_seconds=audio_seconds):
                 saved = self.banner_request("PUT", "/profile/banner", token=token,
@@ -306,16 +310,26 @@ class TestCommunity(unittest.TestCase):
                 self.assertAlmostEqual(float(info["format"]["duration"]), 2, delta=.03)
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg unavailable")
-    def test_video_banner_duration_by_role(self):
+    def test_video_banner_duration_and_audio_by_eligibility(self):
         upload = "/profile/banner"
         ten_seconds = self.make_banner_clip(10)
         over_limit = self.make_banner_clip(10.25)
-        _, ordinary = self.user("ordinary-video-banner")
-        denied = self.banner_request("PUT", upload, token=ordinary, data=ten_seconds)
+        ordinary_id, ordinary = self.user("ordinary-video-banner")
+        cm_db.set_progression(ordinary_id, 0, 2)
+        silent = self.make_banner_clip(5, audio_seconds=0)
+        saved = self.banner_request("PUT", upload, token=ordinary, data=silent)
+        self.assertEqual(saved.status, 200, saved.wfile.getvalue())
+        silent_url = json.loads(saved.wfile.getvalue())["bannerUrl"]
+        denied = self.banner_request("PUT", upload, token=ordinary, data=self.make_banner_clip(5))
+        self.assertEqual(denied.status, 403)
+        self.assertIn("Lv.3", json.loads(denied.wfile.getvalue())["error"])
+        denied = self.banner_request("PUT", upload, token=ordinary, data=self.make_banner_clip(5.25, audio_seconds=0))
         self.assertEqual(denied.status, 400)
         self.assertIn("5 秒", json.loads(denied.wfile.getvalue())["error"])
+        self.assertEqual(self.call("GET", "/profile", token=ordinary)[1]["bannerUrl"], silent_url)
 
-        for role, grant in (("owner", cm_db.set_owner), ("super", cm_db.set_super), ("admin", cm_db.set_admin)):
+        for role, grant in (("lv3", lambda uid: cm_db.set_progression(uid, 0, 3)),
+                            ("owner", cm_db.set_owner), ("super", cm_db.set_super), ("admin", cm_db.set_admin)):
             with self.subTest(role=role):
                 uid, token = self.user("video-banner-" + role)
                 grant(uid)
@@ -327,10 +341,12 @@ class TestCommunity(unittest.TestCase):
                 self.assertIn("10 秒", json.loads(rejected.wfile.getvalue())["error"])
                 output = Path(self.tmp.name) / "extended.mp4"
                 output.write_bytes(self.banner_request("GET", path).wfile.getvalue())
-                seconds = subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                                                    "-of", "csv=p=0", str(output)])
-                self.assertEqual(float(seconds), 10)
+                reported = subprocess.check_output(["ffprobe", "-v", "error", "-show_entries",
+                                                    "format=duration:stream=codec_type", "-of", "json", str(output)])
+                info = json.loads(reported)
+                self.assertEqual(float(info["format"]["duration"]), 10)
+                self.assertEqual([stream["codec_type"] for stream in info["streams"]], ["video", "audio"])
 
         cm_db.set_admin(uid, False)
-        self.assertEqual(self.banner_request("PUT", upload, token=token, data=ten_seconds).status, 400)
+        self.assertEqual(self.banner_request("PUT", upload, token=token, data=ten_seconds).status, 403)
         self.assertEqual(self.banner_request("GET", path).status, 200)

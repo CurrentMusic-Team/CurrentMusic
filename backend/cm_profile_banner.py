@@ -15,6 +15,8 @@ VIDEO_BYTES = 16 * 1024 ** 2
 VIDEO_SECONDS = 5
 EXTENDED_VIDEO_SECONDS = 10
 VIDEO_OUTPUT_BYTES = 2 * 1024 ** 2
+PRIVILEGE_LEVEL = 3
+PRIVILEGED_USERS = "站长、超管、管理员或 Lv.3 及以上用户"
 IMAGE_FORMATS = {"image/jpeg": "JPEG", "image/png": "PNG", "image/webp": "WEBP", "application/octet-stream": ""}
 IMAGE_BYTES = 32 * 1024 ** 2
 IMAGE_OUTPUT_BYTES = 48 * 1024 ** 2
@@ -61,9 +63,8 @@ def upload_lossless_image(handler, content_type, crop):
         _MEDIA_JOBS.release()
 
 
-def upload_video(handler, *, extended=False):
+def upload_video(handler, *, privileged=False):
     length = _upload_length(handler, "视频", VIDEO_BYTES)
-    max_seconds = EXTENDED_VIDEO_SECONDS if extended else VIDEO_SECONDS
     probe, encoder = shutil.which("ffprobe"), shutil.which("ffmpeg")
     if not probe or not encoder:
         raise MediaError(503, "横幅视频处理暂不可用")
@@ -74,7 +75,7 @@ def upload_video(handler, *, extended=False):
             work = Path(directory)
             source, target = work / "source", work / "banner.mp4"
             read_upload(handler, source, length)
-            _encode(source, target, probe, encoder, max_seconds)
+            _encode(source, target, probe, encoder, privileged)
             return target.read_bytes()
     except OSError as exc:
         raise MediaError(503, "横幅视频处理暂不可用") from exc
@@ -82,25 +83,31 @@ def upload_video(handler, *, extended=False):
         _MEDIA_JOBS.release()
 
 
-def _encode(source, target, probe, encoder, max_seconds):
+def _encode(source, target, probe, encoder, privileged):
+    max_seconds = EXTENDED_VIDEO_SECONDS if privileged else VIDEO_SECONDS
     with source.open("rb") as handle:
         if handle.read(8)[4:] != b"ftyp":
             raise MediaError(400, "横幅视频须为 MP4 或 MOV 文件")
     with tempfile.TemporaryFile(dir=source.parent) as report:
-        _run([probe, "-v", "error", *MOV_INPUT_ARGS, "-select_streams", "V:0", "-show_entries",
-              "format=start_time,duration:stream=index,width,height,start_time,duration", "-of", "json", source],
+        _run([probe, "-v", "error", *MOV_INPUT_ARGS, "-show_entries",
+              "format=start_time,duration:stream=index,codec_type,width,height,start_time,duration:stream_disposition=attached_pic",
+              "-of", "json", source],
              65536, 10, source.parent, report)
         report.seek(0)
         try:
             info = json.load(report)
-            video = info["streams"][0]
+            streams = info["streams"]
+            video = next(stream for stream in streams if stream.get("codec_type") == "video"
+                         and not stream.get("disposition", {}).get("attached_pic"))
             width, height = video["width"], video["height"]
             container = info["format"]
             duration = float(video.get("duration") or container["duration"])
             input_start = float(container.get("start_time", 0))
             video_start = float(video.get("start_time", input_start))
-        except (IndexError, KeyError, TypeError, ValueError) as exc:
+        except (StopIteration, KeyError, TypeError, ValueError) as exc:
             raise MediaError(400, "无法读取横幅视频的尺寸或时长") from exc
+    if not privileged and any(stream.get("codec_type") == "audio" for stream in streams):
+        raise MediaError(403, f"有声横幅仅限{PRIVILEGED_USERS}")
     if min(width, height) < 2 or max(width, height) > 3840 or width * height > 3840 * 2160:
         raise MediaError(400, "横幅视频最长边需 ≤3840 像素，总像素数需 ≤830 万")
     if not math.isfinite(duration) or not 0 < duration <= max_seconds:
@@ -112,9 +119,10 @@ def _encode(source, target, probe, encoder, max_seconds):
     end = min(max_seconds, duration + max(0, video_start - input_start))
     output_limit = VIDEO_OUTPUT_BYTES * max_seconds // VIDEO_SECONDS
     filters = "crop=w='min(iw,ih*3/2/sar)':h='min(ih,iw*sar*2/3)',scale=720:480,setsar=1,fps=24"
+    audio_map = ["-map", "0:a:0?"] if privileged else ["-an"]
     _run([encoder, "-nostdin", "-v", "error", "-xerror", "-err_detect", "explode",
           "-abort_on", "empty_output", *MOV_INPUT_ARGS, "-threads", "1", "-i", source,
-          "-map", f"0:{video['index']}", "-map", "0:a:0?", "-sn", "-dn", "-map_metadata", "-1",
+          "-map", f"0:{video['index']}", *audio_map, "-sn", "-dn", "-map_metadata", "-1",
           "-map_metadata:s", "-1", "-map_chapters", "-1", "-t", str(end),
           "-filter_threads", "1", "-vf", filters, "-threads", "1", "-c:v", "libx264",
           "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23", "-maxrate", "2M",
