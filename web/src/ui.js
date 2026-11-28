@@ -49,6 +49,7 @@ export const QUALITY_TIERS = [
 export function tierLabel(k) {
   if (k === 'matched') return '匹配音源';
   if (k === 'dolby') return '杜比全景声';
+  if (k === 'vivid') return '臻音全景声';
   return QUALITY_TIERS.find(t => t.key === k)?.label || k;
 }
 

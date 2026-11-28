@@ -35,11 +35,11 @@ from concurrent.futures import ThreadPoolExecutor
 # ---------------------------------------------------------------- 档位策略
 
 QUALITY_PRIORITY = (
-    "vivid", "dolby", "jymaster", "sky", "jyeffect", "hires",
+    "dolby", "vivid", "jymaster", "sky", "jyeffect", "hires",
     "lossless", "exhigh", "higher", "standard",
 )
-OPT_IN_TIERS = frozenset(("vivid", "dolby"))
-TIERS = tuple(level for level in QUALITY_PRIORITY if level not in OPT_IN_TIERS)
+SPATIAL_TIERS = frozenset(("dolby", "vivid"))
+TIERS = tuple(level for level in QUALITY_PRIORITY if level not in SPATIAL_TIERS)
 
 # 以名义码率筛选档位。音质优先级由 QUALITY_PRIORITY 定义。
 NOMINAL_BR = {
@@ -59,7 +59,7 @@ def quantize_max_br(max_br) -> int:
     return max((br for br in NOMINAL_BR.values() if br <= limit), default=NOMINAL_BR["standard"])
 
 
-def probe_tiers(max_br: int = 0, supports_dolby: bool = False, *, supports_vivid: bool = False):
+def probe_tiers(max_br: int = 0, supports_dolby: bool = False, *, supports_vivid: bool = True):
     """按优先级返回设备能力及名义码率上限允许探测的档位。"""
     if max_br:
         return tuple(level for level in TIERS if NOMINAL_BR[level] <= max_br) or ("standard",)

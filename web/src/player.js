@@ -637,7 +637,7 @@ export const player = {
     this.persist();
   },
 
-  async playAt(i, { skipDolby = false, pos = 0 } = {}) {
+  async playAt(i, { fallbackFrom = '', pos = 0 } = {}) {
     if (i < 0 || i >= this.queue.length || (this.playPending && this.queue[i] === this.meta)) return;
     if (!auth.token) {                     // 游客：弹登录提示，不解析音源
       this.loading = false;
@@ -647,7 +647,8 @@ export const player = {
       return;
     }
     flushListen(true);             // 结算上一首，包括尚未上报的尾段
-    const request = this._playRequest = { skipDolby };
+    const qualityOptions = fallbackFrom ? { supportsDolby: false, supportsVivid: fallbackFrom !== 'vivid' } : {};
+    const request = this._playRequest = { qualityOptions };
     this.index = i;
     const meta = this.meta = this.queue[i];
     this.urlInfo = null;
@@ -672,7 +673,7 @@ export const player = {
     let info;
     try {
       const pf = this._prefetch;
-      if (!skipDolby && pf && pf.identity === sourceIdentity() && String(pf.id) === String(this.meta.ncm_id)) {
+      if (!fallbackFrom && pf && pf.identity === sourceIdentity() && String(pf.id) === String(this.meta.ncm_id)) {
         info = pf.info;
         // 用完即弃：已缓冲字节留在媒体缓存供主元素复用，下载立即终止
         this._discardPrefetch();
@@ -680,11 +681,11 @@ export const player = {
       } else {
         const _pl2 = isKugouSong(meta) ? { level: kugouQuality() } : effectiveLevel();
         try {
-          info = await resolveSongUrl(meta, _pl2.level, _pl2.immerse, skipDolby ? { supportsDolby: false } : undefined);
+          info = await resolveSongUrl(meta, _pl2.level, _pl2.immerse, qualityOptions);
         } catch (e) {
           if (!isKugouSong(meta) && _pl2.level !== settings.quality) {
             toast('该音效当前不可用，已回退普通音质');
-            info = await resolveSongUrl(meta, settings.quality);
+            info = await resolveSongUrl(meta, settings.quality, undefined, qualityOptions);
           } else throw e;
         }
       }
@@ -1109,7 +1110,7 @@ async function recoverStalled() {
     // 不让服务端轮换到别的线）；未锁定（刚进站还没测完）时由服务端换线兜底
     const pin = network.cdn === 'auto' ? (lineBest.byFam[famOf(((player.urlInfo || {}).host) || '')] || '') : '';
     const info = await resolveSongUrl(player.meta, _pl3.level, _pl3.immerse, {
-      refresh: true, host: pin, supportsDolby: request?.skipDolby ? false : undefined,
+      refresh: true, host: pin, ...request?.qualityOptions,
     });
     if (player._playRequest !== request) return;
     const betterR = swapLine(info);
@@ -1248,8 +1249,8 @@ function bindAudio(el) {
       emit('stalling', false);
       emit('state');
     }
-    if (player.urlInfo.autoDolby) {
-      player.playAt(player.index, { skipDolby: true, pos: el.currentTime || 0 });
+    if (player.urlInfo.autoSpatial) {
+      player.playAt(player.index, { fallbackFrom: player.urlInfo.autoSpatial, pos: el.currentTime || 0 });
       return;
     }
     errStreak++;
