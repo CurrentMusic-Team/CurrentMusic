@@ -61,6 +61,7 @@ import cm_social
 import cm_region
 import cm_lines
 import cm_usage
+import cm_x_releases
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("cm")
@@ -3286,6 +3287,7 @@ def route(handler, method):
         base = base_url(handler)
         own = [
             ("GET", "/health", "公开", "服务健康检查"),
+            ("GET", "/x/releases", "公开", "CurrentMusicX CI 更新元数据，传 channel=ci；结果共享缓存 60 秒"),
             ("GET", "/usage", "公开", "API 调用与歌曲流量的年、月、周、日聚合"),
             ("POST", "/usage/audio", "Bearer", "幂等上报直连歌曲的累计估算字节"),
             ("GET", "/music-service/descriptor", "公开", "外接音乐服务协议 v1 描述与已启用能力"),
@@ -5509,6 +5511,16 @@ def route(handler, method):
         if not os.path.isfile(fp):
             raise ApiError(404, "安装包不存在")
         return serve_file(handler, fp, "application/vnd.android.package-archive")
+
+    # CurrentMusicX CI 更新元数据镜像
+    if path == "/x/releases" and method == "GET":
+        if q.get("channel") != "ci":
+            return jresp(handler, 400, {"error": "channel 必须为 ci"}, cache_control="no-store")
+        releases = cm_x_releases.ci_releases.get()
+        if releases is None:
+            return jresp(handler, 503, {"error": "CurrentMusicX CI 更新元数据暂不可用"},
+                         cache_control="no-store")
+        return jresp(handler, 200, releases, cache_control="no-store")
 
     # ======================== CurrentMusicX 安装包直链（v1.28.23） ========================
     # 上游是第三方仓库（bileizhen/CurrentMusicX）的 GitHub Releases；本机由
