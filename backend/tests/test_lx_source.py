@@ -24,6 +24,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import cm_db  # noqa: E402
+import cm_kugou  # noqa: E402
 import cm_lx  # noqa: E402
 import cm_ncm  # noqa: E402
 import cm_server  # noqa: E402
@@ -202,9 +203,11 @@ eval(script);
 (async () => {
   const url = await handleRequest({ source: 'wy', action: 'musicUrl',
     info: { type: '320k', musicInfo: { songmid: '186016' } } });
+  const kgUrl = await handleRequest({ source: 'kg', action: 'musicUrl',
+    info: { type: 'flac', musicInfo: { hash: 'A'.repeat(32), albumAudioId: 123 } } });
   const lyric = await handleRequest({ source: 'wy', action: 'lyric',
     info: { type: '320k', musicInfo: { songmid: '186016' } } });
-  console.log(JSON.stringify({ initResult, initError, url, lyric }));
+  console.log(JSON.stringify({ initResult, initError, url, kgUrl, lyric }));
 })().catch(e => { console.log(JSON.stringify({ fatal: String(e && e.message || e) })); });
 """
 
@@ -321,9 +324,13 @@ class LxSourceTests(unittest.TestCase):
         self.assertEqual(wy["type"], "music")
         self.assertEqual(wy["actions"], ["musicUrl"])  # 官方 wy 只接受 musicUrl
         self.assertEqual(wy["qualitys"], ["128k", "320k", "flac", "flac24bit"])
+        self.assertEqual(out["initResult"]["sources"]["kg"], {
+            "type": "music", "actions": ["musicUrl"], "qualitys": ["128k", "320k", "flac"],
+        })
         # handleRequest 的 .then() 链路与官方字段校验均应通过
         self.assertEqual(out["url"]["url"], "https://m804.music.126.net/official.mp3")
         self.assertEqual(out["url"]["type"], "320k")
+        self.assertEqual(out["kgUrl"], {"type": "flac", "url": "https://m804.music.126.net/official.mp3"})
         self.assertIn("[00:01.00]官方契约", out["lyric"]["lyric"])
 
     @unittest.skipUnless(NODE_BIN, "需要 Node 运行时")
@@ -414,6 +421,16 @@ class LxSourceTests(unittest.TestCase):
                  replyBody={"songs": [{"ncm_id": 456}], "totals": {"song": 3}, "hasMore": {"song": False}},
                  replyStatus=200),
             dict(name="search_blank", source="wy", action="search", info={"keywords": "  "}),
+            dict(name="kg_legacy", source="kg", action="musicUrl",
+                 info={"musicInfo": {"songmid": 20505418, "hash": "A" * 32, "albumAudioId": 123}, "type": "320k"},
+                 replyPrefix="https://engine.example/cm/lx/kugou/url",
+                 replyBody={"url": "https://engine.example/cm/kugou/media/example"}, replyStatus=200),
+            dict(name="kg_hash_only", source="kg", action="musicUrl",
+                 info={"musicInfo": {"meta": {"hash": "B" * 32}}, "type": "128k"},
+                 replyPrefix="https://engine.example/cm/lx/kugou/url",
+                 replyBody={"url": "https://engine.example/cm/kugou/media/example"}, replyStatus=200),
+            dict(name="kg_bad_quality", source="kg", action="musicUrl",
+                 info={"musicInfo": {"hash": "a" * 32}, "type": "flac24bit"}),
             # 非 wy 源 / 未知动作 / 未知音质 → 明确报错
             dict(name="tx_rejected", mode="v2", source="tx", action="musicUrl",
                  info={"musicInfo": {"songmid": "x"}, "type": "320k"}),
@@ -463,6 +480,14 @@ class LxSourceTests(unittest.TestCase):
             self.assertEqual(r["options"]["headers"]["Authorization"], "Bearer tok-lx-123")
             self.assertEqual(r["options"]["timeout"], cm_lx.PLAYBACK_TIMEOUT_MS)
             self.assertIn("cn=1", r["url"])          # 落雪直链固定用国内 RealIP 取址
+        kg_calls = [r for r in out["requests"] if "/lx/kugou/url" in r["url"]]
+        self.assertEqual([r["url"].split("?")[1] for r in kg_calls],
+                         [f"id={'a' * 32}-123&quality=exhigh", f"id={'b' * 32}&quality=standard"])
+        for r in kg_calls:
+            self.assertEqual(r["options"]["headers"]["Authorization"], "Bearer tok-lx-123")
+        for case in ("kg_legacy", "kg_hash_only"):
+            self.assertEqual(by_name[case]["data"], "https://engine.example/cm/kugou/media/example")
+        self.assertIn("不支持的音质", by_name["kg_bad_quality"]["err"])
         self.assertEqual(sum("id=186001" in r["url"] for r in song_calls), 10)   # 含 401 用例
         self.assertEqual(sum("id=999" in r["url"] for r in song_calls), 1)
         self.assertEqual(sum("id=x" in r["url"] for r in song_calls), 0)   # tx 源在发请求前即拒绝
@@ -497,7 +522,7 @@ class LxSourceTests(unittest.TestCase):
         self.assertEqual(by_name["legacy_callback"]["err"], None)
         self.assertEqual(by_name["legacy_callback"]["data"], "https://m804.music.126.net/d.mp3")
         # 失败路径
-        self.assertIn("登录已失效", by_name["expired"]["err"])
+        self.assertIn("直链已失效", by_name["expired"]["err"])
         self.assertIn("未取得可用地址", by_name["match_failed"]["err"])
         # lyric LRC
         lyric = by_name["lyric"]["data"]
@@ -787,6 +812,27 @@ class LxSharedTokenTests(unittest.TestCase):
         self.assertGreater(d["expiresAt"], time.time() + 86000)
         self.assertEqual(self.call("POST", "/lx/shared", {"expiresAt": 1},
                                    token=self.session)[0], 400)   # 过去时间拒绝
+
+    def test_kugou_playback_uses_lx_permissions_and_shared_expiry(self):
+        digest = "a" * 32
+        path = f"/lx/kugou/url?id={digest.upper()}-123&quality=lossless"
+        shared = cm_db.lx_shared_token_issue(self.uid, self.uid, label="公测")
+        personal = cm_db.lx_token_issue(self.uid)
+        with mock.patch.object(cm_kugou, "playback_enabled", return_value=True), \
+             mock.patch.object(cm_kugou, "resolve", return_value={"url": "https://media.example/audio"}) as resolve:
+            self.assertEqual(self.call("GET", path)[0], 401)
+            self.assertEqual(self.call("GET", path + "&token=" + self.session)[0], 401)
+            self.assertEqual(self.call("GET", path, token=shared)[0], 200)
+            self.assertEqual(resolve.call_args.args[:3], (digest + "-123", "lossless", self.uid))
+            self.assertEqual(resolve.call_args.kwargs, {"allow_hash_lookup": True})
+            self.assertEqual(self.call("GET", path, token=personal)[0], 200)
+            self.assertEqual(self.call("GET", path, token=self.session)[0], 200)
+            self.assertEqual(self.call("POST", "/kugou/v1/playback.resolve", {"id": digest + "-123"},
+                                       token=shared)[0], 401)
+            cm_db.lx_shared_token_revoke(cm_db.lx_shared_token_list()[0]["id"])
+            self.assertEqual(self.call("GET", path, token=shared)[0], 401)
+            with mock.patch.object(cm_kugou, "authorized_user", return_value=False):
+                self.assertEqual(self.call("GET", path, token=personal)[0], 403)
 
     call = harness.TestPasswordReset.call
     make_user = harness.TestPasswordReset.make_user

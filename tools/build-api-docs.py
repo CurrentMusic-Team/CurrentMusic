@@ -228,6 +228,8 @@ def auth(node):
     names = {getattr(n.func, 'id', '') for n in ast.walk(node) if isinstance(n, ast.Call)}
     if 'require_admin' in names:
         return '管理员 Bearer；角色、目标用户等级等限制另见校验说明'
+    if 'require_music_user' in names:
+        return '落雪个人或公用音源令牌，或 CurrentMusic 登录会话 Bearer'
     if names & {'require_user', '_get_room', '_roaming_binding'}:
         return 'CurrentMusic Bearer 登录态；房间/绑定等条件另见校验'
     if 'optional_user' in names:
@@ -240,6 +242,8 @@ def endpoint_text(method, path, node, title, access=None):
     text = [f'## {method} /cm{path}', '', title, '', f'**权限**：{permission}。', '']
     if path.startswith('/rooms'):
         text += ['请求与响应细节见[一起听房间 API 与同步协议](guide-rooms-design.md)。', '']
+    if path.startswith('/lx/'):
+        text += ['请求与响应细节见[落雪音乐自定义音源](guide-lx-music-source.md)。', '']
     if path.startswith(('/donation', '/admin/donations')):
         text += ['收款对象、支付方式和客户端兼容规则见[官方捐赠与第三方接入](guide-donations-api.md)。', '']
     if path.startswith(('/posts', '/profile/banner')) or path in ('/users/{id}/profile', '/users/{id}/banner', '/auth/me', '/profile'):

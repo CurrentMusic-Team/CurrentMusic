@@ -1,6 +1,6 @@
 # 落雪音乐自定义音源
 
-CurrentMusic Engine 可以包装成[落雪音乐（LX Music）](https://github.com/lyswhut/lx-music-desktop)的自定义音源：在 LX Music 的「设置 → 自定义源」中通过 URL 导入一条直链，「网易音乐」源的播放地址与歌词即由 Engine 以你的 CurrentMusic 账号解析。
+在落雪音乐的「设置 → 自定义源」中通过 URL 导入流声引擎直链，即可为网易云音乐和酷狗音乐提供播放地址。酷狗音乐（`kg`）由服务端的酷狗概念版曲库提供音频。[落雪音乐（LX Music）](https://github.com/lyswhut/lx-music-desktop)
 
 ```
 https://music.20110208.xyz/cm/lx/source.js?token=<音源专用令牌>
@@ -29,13 +29,13 @@ https://music.20110208.xyz/cm/lx/source.js?token=<音源专用令牌>
 - **匹配音源降级**：新版官方取址失败或只返回试听时，使用与 Web 相同的[完整音频匹配](playback-sources.md)。匹配也失败时尝试旧版官方取址，并拒绝试听链接。服务端分别返回 `level: "matched"` 或 `level: "legacy"` 表示降级结果。脚本按 LX 协议返回 URL 字符串，客户端的音质选择仍表示请求档位。
 - **search**（wy 扩展）：复用 Web 的[公开曲库补充](search-catalog.md)，把精确匹配放在单曲搜索首屏前部。
 - **lyric**（wy 源）：歌词走 Engine 归一化接口，主歌词、翻译与罗马音按毫秒时间轴转换成 LRC。官方客户端的 `wy` 动作白名单只开放 `musicUrl`，因此不在 `inited` 中声明；支持该协议的衍生客户端可直接调用；
-- 其余音源（kw/kg/tx/mg）与动作会明确返回不支持，不会误解析。
+- **musicUrl**（kg 源）：v1.2.0 起，启用了酷狗播放的服务端会声明 `128k / 320k / flac` 三档，分别对应 `standard / exhigh / lossless`。服务端按录音哈希和专辑音频 ID 查找原录音，并返回短期 HTTPS 媒体地址。指定档位没有可验证的完整音频时返回错误。
 
 脚本遵循官方自定义源运行时协议：`request` 事件的 handler **返回 Promise**（官方沙箱直接对返回值 `.then()`，不传 callback），同时兼容老式 callback 调用；沙箱已预解析的 JSON 响应（`resp.body` 为对象）与字符串响应都能处理；整体包在 IIFE 中，重复载入不会因顶层重复声明而失败。
 
 ## 搜索扩展
 
-从同一直链重新导入 v1.1.0 后，支持扩展调用的宿主可向 `request` handler 传入以下数据。
+从同一直链重新导入音源后，支持扩展调用的宿主可向 `request` handler 传入以下数据。
 
 ```json
 {
@@ -53,7 +53,7 @@ https://music.20110208.xyz/cm/lx/source.js?token=<音源专用令牌>
 
 直链中的令牌优先使用**音源专用令牌**（`clx_` 前缀，每账号一个）：
 
-- 只能用于 `/lx/source.js` 与 `/ncm/song/url` 两个端点——不能登录、不能读取资料、不能调用任何其它接口；
+- 可用于 `/lx/source.js`、`/ncm/song/url` 与 `/lx/kugou/url`，权限限于音源脚本下载和播放取链；
 - 独立于登录会话：退出登录、修改密码、「下线其他设备」都不会使它失效；
 - 服务端只保存其 sha256 哈希，明文只在生成/轮换时返回一次；网页端会把直链缓存在本机（localStorage）以便随时复制，换设备后可轮换取得新直链；
 - 退出登录之外的失效方式只有两种：**轮换**（旧直链立即作废，返回新直链）与**撤销**（音源功能停用）。
@@ -62,23 +62,34 @@ https://music.20110208.xyz/cm/lx/source.js?token=<音源专用令牌>
 
 ## 音源脚本
 
-`GET /cm/lx/source.js` 按查询参数中的个人令牌返回定制的音源脚本。
+`GET /cm/lx/source.js` 按查询参数中的令牌返回定制的音源脚本。
 
 | 查询参数 | 说明 |
 | --- | --- |
-| `token` | 音源专用令牌（`clx_`）或登录会话令牌，必填 |
+| `token` | 个人音源令牌（`clx_`）、公用音源令牌（`clx_sh_`）或登录会话令牌，必填 |
 
-- 成功返回 HTTP 200，`Content-Type: text/javascript`，头部携带 LX 客户端解析的 `@name/@description/@version/@author` 注释。`request` 事件的取链动作回连 `/cm/ncm/song/url` 并携带 Bearer，搜索和歌词扩展调用公开的 `/cm/ncm/search` 与 `/cm/ncm/lyric`。
+- 成功返回 HTTP 200，`Content-Type: text/javascript`，头部携带 LX 客户端解析的 `@name/@description/@version/@author` 注释。取链动作通过 Bearer 调用对应的网易云或酷狗接口。网易云搜索和歌词扩展调用公开的 `/cm/ncm/search` 与 `/cm/ncm/lyric`。
 - 缺少 `token` 返回 HTTP 401。
 - **令牌无效或已失效**（轮换/撤销后的旧直链、已退出的登录会话）：客户端只显示 HTTP 状态码、不显示响应体，裸 401 会让用户看到「下载音源失败（HTTP 401）」而无从判断。因此这里返回 HTTP 200 的**失效提示脚本**：源列表中直接显示「直链已失效，请到 CurrentMusic 设置页重新复制」的说明，且不声明任何可用音源（不会产生错误播放）。提示脚本不含任何令牌。
 - 响应声明 `Cache-Control: no-store`：脚本内容因人而异且内嵌令牌，不允许任何中间缓存。
 - 端点按认证入口限速（30 次/分钟/IP）。令牌为高熵随机值，路径本身不泄露额外信息。
 
-## 公用（内部测试）令牌
+## 酷狗概念版取链
+
+`GET /cm/lx/kugou/url` 接受个人音源令牌、公用音源令牌或登录会话 Bearer。
+
+| 查询参数 | 说明 |
+| --- | --- |
+| `id` | 必填。32 位十六进制录音哈希。客户端有专辑音频 ID 时可用 `哈希-专辑音频ID` |
+| `quality` | 可选。支持 `standard`、`exhigh`、`lossless`，默认 `auto` |
+
+命中后返回 `{url, quality, format, bitrate, expiresIn}`。媒体地址支持 `HEAD` 与单段 `Range`，到期后重新取链。脚本只声明 `musicUrl`，酷狗曲库搜索和歌词由落雪客户端处理。
+
+## 公用（测试）令牌
 
 需要把音源临时分享给多位测试者时，管理员可签发**公用令牌**（`clx_sh_` 前缀）：
 
-- 与个人令牌同权限、同样的端点范围（仅 `/lx/source.js` 与 `/ncm/song/url`），不能登录、不能读资料；
+- 与个人令牌共用脚本下载和播放取链权限；
 - 可同时存在多条，可分别设置到期时间（`expiresAt` 或 `days`），也可随时单独撤销/删除；
 - 一条失效不影响其它令牌，也不影响签发者的个人专用令牌；
 - 取链身份记为签发者账号，服务端 SVIP Cookie 同样生效。
@@ -119,6 +130,6 @@ CurrentMusicX 报「落雪音源执行失败或超出运行限制」时，先看
 
 ## 安全边界
 
-- 直链与导入后的脚本内容都等同于「仅限取链」的凭证，仍**请勿分享给他人**；它只能以你自己的账号取链，不能读取你的网易云 Cookie 或其他凭据。
+- 个人直链及导入后的脚本含个人音源凭证。需要分享测试时，请签发独立的公用令牌。
 - 怀疑泄露时轮换令牌即可；彻底停用走撤销。
 - 取链请求仍受[播放音源策略](playback-sources.md)约束：按调用方 IP 隔离缓存、匹配音频须通过完整时长与音频头校验，不会因第三方客户端调用而放宽。

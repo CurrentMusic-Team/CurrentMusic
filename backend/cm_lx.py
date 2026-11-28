@@ -4,9 +4,9 @@
 
 - 入口是 ``GET /lx/source.js?token=<个人令牌>``（见 cm_server.route）；
 - 返回的脚本头部携带 LX 客户端解析的 ``@name``/``@description``/``@version`` 等注释，
-  主体监听 ``globalThis.lx`` 的 ``request`` 事件，用 ``wy`` 源的 ``songmid`` 回连
-  Engine 的 ``/ncm/song/url``（musicUrl）与公开的 ``/ncm/lyric``（lyric）；
-  支持搜索扩展的宿主可调用 ``search``，复用 Web 的 ``/ncm/search``；
+  主体监听 ``globalThis.lx`` 的 ``request`` 事件，分别用网易云（``wy``）歌曲 ID
+  和酷狗（``kg``）录音哈希请求 ``/ncm/song/url`` 和 ``/lx/kugou/url``；
+  网易云歌词和搜索扩展复用公开的 ``/ncm/lyric`` 和 ``/ncm/search``；
 - 直链与脚本内容都内嵌令牌，响应禁止缓存，日志不记录令牌；
   令牌失效时返回提示脚本，用户可重新生成直链。
 
@@ -20,7 +20,7 @@
   返回值 ``.then()``，不传 callback）；老式 callback 形态作为兼容路径保留；
 - 沙箱的 ``request`` 已对 JSON 响应自动 ``JSON.parse``，``resp.body`` 可能
   已经是对象，也可能是字符串（parse 失败或衍生环境），两种都要处理；
-- 官方 ``wy`` 源的动作白名单只有 ``musicUrl``（``lyric``/``pic`` 仅 local 源
+- 官方 ``wy`` 和 ``kg`` 源的动作白名单只有 ``musicUrl``（``lyric``/``pic`` 仅 local 源
   开放，多余的声明会被过滤；个别衍生版甚至严格校验直接判失败），
   因此 ``inited`` 只声明 ``musicUrl``。支持扩展的宿主可以直接调用 ``lyric`` 和 ``search``。
 """
@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 
 # 音源脚本自身的版本。LX 客户端靠它判断「检查更新」是否需要拉新脚本。
-SOURCE_VERSION = "1.1.0"
+SOURCE_VERSION = "1.2.0"
 
 # 兜底基址：仅在请求头完全推不出对外域名时使用（正常线上永远走 Host 头）。
 DEFAULT_API_BASE = "https://music.20110208.xyz/cm"
@@ -41,7 +41,7 @@ PLAYBACK_TIMEOUT_MS = 36000
 _SCRIPT_TEMPLATE = r"""
 /*!
  * @name CurrentMusic 流声引擎
- * @description 流声引擎网易云音源，支持曲库搜索扩展和灰色曲目匹配。
+ * @description 流声引擎网易云和酷狗概念版音源，支持网易云曲库搜索扩展和灰色曲目匹配。
  * @version __SOURCE_VERSION__
  * @author Rcst20
  * @homepage https://music.20110208.xyz/home/engine/
@@ -87,6 +87,7 @@ const QUALITY_LEVELS = {
   'wav': 'lossless',
 }
 const qualitys = ['128k', '320k', 'flac', 'flac24bit', 'hires', 'atmos', 'master']
+const KUGOU_QUALITIES = { '128k': 'standard', '320k': 'exhigh', 'flac': 'lossless' }
 
 function httpGet(url, needAuth, timeout = REQUEST_TIMEOUT) {
   return new Promise((resolve, reject) => {
@@ -106,7 +107,7 @@ function httpGet(url, needAuth, timeout = REQUEST_TIMEOUT) {
           try { data = JSON.parse(data) } catch (e) { data = null }
         }
         if (resp.statusCode === 401) {
-          return finish(reject, new Error('CurrentMusic 登录已失效：请到网页端「设置 → 落雪音乐音源」重新生成直链'))
+          return finish(reject, new Error('CurrentMusic 音源直链已失效，请重新导入有效直链'))
         }
         if (resp.statusCode === 429) return finish(reject, new Error('请求过于频繁，请稍后再试'))
         if (resp.statusCode >= 400) {
@@ -131,7 +132,21 @@ function musicUrl(musicInfo, quality) {
   // 灰色曲目也不会因为 Cloudflare 边缘 IP 被判成地区不可用）。
   const url = API_BASE + '/ncm/song/url?id=' + encodeURIComponent(id)
     + '&level=' + level + '&cn=1'
-  // matched 和 legacy 也是可播放的结果。官方 LX 宿主要求只返回 URL 字符串。
+  return getMusicUrl(url)
+}
+
+function kugouMusicUrl(musicInfo, quality) {
+  const track = musicInfo || {}
+  const meta = track.meta || {}
+  const hash = String(track.hash || meta.hash || '')
+  if (!/^[a-f0-9]{32}$/i.test(hash)) return Promise.reject(new Error('缺少有效的酷狗录音哈希'))
+  const mixId = String(track.albumAudioId || meta.albumAudioId || '')
+  const id = hash.toLowerCase() + (/^[1-9][0-9]{0,14}$/.test(mixId) ? '-' + mixId : '')
+  return getMusicUrl(API_BASE + '/lx/kugou/url?id=' + id + '&quality=' + KUGOU_QUALITIES[quality])
+}
+
+// LX 宿主要求 musicUrl 返回 URL 字符串。
+function getMusicUrl(url) {
   return httpGet(url, true, PLAYBACK_TIMEOUT).then((d) => {
     if (typeof d.url !== 'string' || !/^https?:\/\//i.test(d.url)) {
       throw new Error(d.error || '该音质档位无可用地址')
@@ -200,19 +215,20 @@ var handler = function (payload) {
   let work
   switch (action) {
     case 'musicUrl':
-      if (source !== 'wy') {
-        work = Promise.reject(new Error('CurrentMusic 音源目前仅支持网易云（wy）音源'))
-      } else if (!info || !Object.prototype.hasOwnProperty.call(QUALITY_LEVELS, info.type)) {
+      if (source !== 'wy' && source !== 'kg') {
+        work = Promise.reject(new Error('CurrentMusic 音源仅支持网易云（wy）和酷狗概念版（kg）'))
+      } else if (!info || !Object.prototype.hasOwnProperty.call(
+        source === 'kg' ? KUGOU_QUALITIES : QUALITY_LEVELS, info.type)) {
         work = Promise.reject(new Error('不支持的音质：' + (info && info.type)))
       } else {
-        work = musicUrl(info.musicInfo, info.type)
+        work = source === 'kg' ? kugouMusicUrl(info.musicInfo, info.type) : musicUrl(info.musicInfo, info.type)
       }
       break
     case 'lyric':
     case 'search':
       // 官方 wy 白名单只有 musicUrl，扩展动作由支持它们的宿主直接调用。
       if (source !== 'wy') {
-        work = Promise.reject(new Error('CurrentMusic 音源目前仅支持网易云（wy）音源'))
+        work = Promise.reject(new Error('此扩展操作仅支持网易云（wy）音源'))
       } else {
         work = action === 'search' ? search(info) : lyric(info && info.musicInfo)
       }
@@ -230,28 +246,39 @@ var handler = function (payload) {
 // 初始化全程兜底：注册失败也不影响 inited 发出，避免客户端判为「初始化失败」。
 try { lx.on(EVENT_NAMES.request, handler) } catch (e) {}
 
+const sources = {
+  wy: {
+    name: 'CurrentMusic 流声引擎',
+    type: 'music',
+    actions: ['musicUrl'],
+    qualitys: qualitys,
+  },
+}
+if (__KUGOU_ENABLED__) {
+  sources.kg = {
+    name: 'CurrentMusic 流声引擎 · 酷狗概念版',
+    type: 'music',
+    actions: ['musicUrl'],
+    qualitys: Object.keys(KUGOU_QUALITIES),
+  }
+}
+
 try {
   lx.send(EVENT_NAMES.inited, {
     status: true,
     openDevTools: false,
-    sources: {
-      wy: {
-        name: 'CurrentMusic 流声引擎',
-        type: 'music',
-        actions: ['musicUrl'],
-        qualitys: qualitys,
-      },
-    },
+    sources: sources,
   })
 } catch (e) {}
 })()
 """.lstrip("\n")
 
 
-def build_source_script(api_base: str, token: str) -> str:
+def build_source_script(api_base: str, token: str, *, kugou_enabled: bool = True) -> str:
     """生成内嵌个人令牌的音源脚本。``api_base`` 形如 ``https://host/cm``。"""
     return (_SCRIPT_TEMPLATE
             .replace("__SOURCE_VERSION__", SOURCE_VERSION)
+            .replace("__KUGOU_ENABLED__", json.dumps(kugou_enabled))
             .replace("__API_BASE__", json.dumps(api_base))
             .replace("__TOKEN__", json.dumps(token))
             .replace("__REQUEST_TIMEOUT_MS__", str(REQUEST_TIMEOUT_MS))

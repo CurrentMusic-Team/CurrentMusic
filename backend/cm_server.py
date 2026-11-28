@@ -1440,12 +1440,11 @@ def require_user(handler, *, allow_query=True):
     return u
 
 
-def require_music_user(handler):
+def require_music_user(handler, *, allow_query=True):
     """音源调用方身份：落雪专用令牌（clx_）、公用令牌（clx_sh_），回退登录会话。
 
-    只用于媒体取链族端点（/ncm/song/url、/lx/source.js）——专用/公用令牌的活动
-    范围被钉死在这两处，拿它访问其它任何接口都会 401。管理令牌走 /lx/token 与
-    /lx/shared 系列，要求真正的登录会话（共享令牌再加管理员校验）。
+    只用于落雪支持的媒体取链端点。管理令牌走 /lx/token 与 /lx/shared 系列，
+    要求真正的登录会话（共享令牌再加管理员校验）。
     """
     auth = handler.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
@@ -1454,7 +1453,7 @@ def require_music_user(handler):
         if u is not None:
             cm_region.note(u["id"], cm_ncm_gateway.client_ip(handler))
             return u
-    return require_user(handler)
+    return require_user(handler, allow_query=allow_query)
 
 
 def _room_out(room):
@@ -2606,10 +2605,10 @@ def route(handler, method):
         handler.wfile.write(data)
         return
 
-    # ======================== 落雪音乐（LX Music）自定义音源（未发布）========================
+    # ======================== 落雪音乐（LX Music）自定义音源 ========================
     # 把 Engine 的取链能力包装成 LX Music 可导入的音源脚本（生成逻辑见 cm_lx）。
     # 直链令牌优先用音源专用令牌（clx_，见 /lx/token 管理），兼容登录会话令牌；
-    # 两种令牌失效即 401。脚本内容因人而异（内嵌令牌），绝不落缓存；
+    # 失效的令牌返回提示脚本。脚本内容内嵌令牌，禁止缓存；
     # 已在 _AUTH_PATHS 按认证入口限速。
     if path == "/lx/source.js" and method in ("GET", "HEAD"):
         token = q.get("token") or ""
@@ -2618,7 +2617,8 @@ def route(handler, method):
         user = (cm_db.lx_shared_token_user(token) or cm_db.lx_token_user(token)
                 or cm_db.user_by_token(token))
         if user:
-            script = cm_lx.build_source_script(cm_lx.api_base_for(handler), token)
+            script = cm_lx.build_source_script(
+                cm_lx.api_base_for(handler), token, kugou_enabled=cm_kugou.playback_enabled())
         else:
             # 客户端只显示 HTTP 状态码、不显示响应体，裸 401 用户完全无从判断。
             # 下发一段「直链已失效」的合法脚本，源列表里就能看到明确指引。
@@ -2628,11 +2628,25 @@ def route(handler, method):
         handler.send_response(200)
         handler.send_header("Content-Type", "text/javascript; charset=utf-8")
         handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Referrer-Policy", "no-referrer")
         handler.send_header("Access-Control-Allow-Origin", "*")
         handler.send_header("Content-Length", str(len(script)))
         handler.end_headers()
         handler.wfile.write(script)
         return
+
+    if path == "/lx/kugou/url" and method == "GET":
+        user = require_music_user(handler, allow_query=False)
+        if not cm_kugou.authorized_user(user):
+            raise ApiError(403, "当前账号没有酷狗播放权限")
+        if not cm_kugou.playback_enabled():
+            raise ApiError(404, "当前流声引擎未启用酷狗播放")
+        try:
+            result = cm_kugou.resolve(q.get("id", "").lower(), q.get("quality") or "auto",
+                                      user["id"], base_url(handler), allow_hash_lookup=True)
+        except cm_kugou.Error as exc:
+            return jresp(handler, exc.status, {"code": exc.code, "error": str(exc)}, cache_control="no-store")
+        return jresp(handler, 200, result, cache_control="no-store")
 
     # ---- 落雪音源专用令牌管理：查看 / 生成 / 轮换 / 撤销（须登录会话 Bearer；
     #      专用令牌本身不能管理自身，避免持有直链者永久固化访问权）----
@@ -2681,7 +2695,7 @@ def route(handler, method):
         return jresp(handler, 200, {"enabled": False})
 
     # ---- 公用（内部测试）音源令牌：管理员签发/查看/撤销 ----
-    # 与个人令牌同权限（仅 /lx/source.js 与 /ncm/song/url），可多条并存、可设到期
+    # 与个人令牌同权限，可多条并存、可设到期
     # 时间（expiresAt=0 表示不过期，由管理员手动撤销）。
     if path == "/lx/shared" and method == "GET":
         require_admin(handler)
@@ -3303,7 +3317,8 @@ def route(handler, method):
             ("GET", "/audio-sources", "Bearer", "自研音源 v1 导入目录，返回音源名称和适用平台。详见 /api-docs/reference/guide-audio-sources-api/"),
             ("GET", "/audio-sources/currentmusic-engine/resolve", "Bearer", "已导入的流声引擎音源取链，接受 id、level、refresh、supportsDolby、supportsVivid；网易云曲库。详见 /api-docs/reference/guide-audio-sources-api/"),
             ("GET", "/badges/powered-by.svg", "公开", "流声引擎署名徽章，返回 SVG；lang 可选 zh-CN（默认）或 en。嵌入示例 /api-docs/reference/guide-engine-badge-api/"),
-            ("GET", "/lx/source.js", "token 查询参数", "落雪音乐（LX Music）自定义音源脚本。token 为落雪音源专用令牌（clx_ 前缀）或 CurrentMusic 登录会话令牌。wy 源支持 musicUrl，兼容宿主可调用公开的 search 和 lyric 扩展。脚本含令牌，no-store 不缓存。缺少令牌返回 401，失效令牌返回提示脚本。详见 /api-docs/reference/guide-lx-music-source/"),
+            ("GET", "/lx/source.js", "token 查询参数", "落雪音乐（LX Music）自定义音源脚本。接受个人音源令牌、公用音源令牌或登录会话。网易云（wy）和已启用的酷狗概念版（kg）支持 musicUrl。兼容宿主可使用网易云搜索与歌词扩展。脚本含令牌，禁止缓存。失效令牌返回提示脚本。详见 /api-docs/reference/guide-lx-music-source/"),
+            ("GET", "/lx/kugou/url", "音源或登录会话 Bearer", "酷狗概念版录音取址。id 为录音哈希，可附加专辑音频 ID，quality 为 standard、exhigh、lossless 或 auto。返回短期 HTTPS 播放票据。详见 /api-docs/reference/guide-lx-music-source/"),
             ("GET", "/lx/token", "Bearer", "查看本人落雪音源专用令牌状态 `{enabled, createdAt, lastSeen}`（不返回明文；明文只在生成/轮换时返回一次）"),
             ("POST", "/lx/token", "Bearer", "生成本人专用令牌，一次性返回 `{token, sourceUrl}` 直链；已有令牌时幂等返回现状（`created:false`），找回直链须轮换"),
             ("POST", "/lx/token/rotate", "Bearer", "轮换专用令牌（`{confirm:1}` 二次确认）：旧直链立即失效，一次性返回新 `{token, sourceUrl}`"),
@@ -5204,7 +5219,7 @@ def route(handler, method):
 
     if path == "/ncm/song/url" and method == "GET":
         # v1.28.33：音源仅限注册用户（其他功能不受影响；游客仍可搜索/浏览/看歌词）。
-        # 未发布：接受落雪音源专用令牌（clx_）——它只被允许到达这里和 /lx/source.js。
+        # 落雪音源专用令牌仅用于脚本下载和支持的播放取链。
         require_music_user(handler)
         """播放地址解析（抗卡顿增强版，见 resolve_play_url）。
 

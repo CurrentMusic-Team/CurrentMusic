@@ -222,6 +222,30 @@ def track(ident):
     raise Error(404, "not_found", "未找到该酷狗录音")
 
 
+def _lx_track(ident, cookie):
+    match = _record.fullmatch(ident)
+    if match:
+        try:
+            return track(ident)
+        except Error as exc:
+            if exc.status != 404:
+                raise
+        digest = match[1]
+    elif _hash.fullmatch(ident):
+        digest = ident
+    else:
+        raise Error(400, "invalid_input", "酷狗录音哈希或专辑音频 ID 格式错误")
+    # 部分落雪歌单只提供哈希，或使用 audio_group_id 作为 albumAudioId。
+    reply = _api("/privilege/lite", {"hash": digest, "qualities": "128"}, cookie=cookie, playback=True)
+    for row in reply.get("data") or []:
+        if not isinstance(row, dict) or str(row.get("hash") or "").lower() != digest:
+            continue
+        candidate = f"{digest}-{row.get('album_audio_id')}"
+        if candidate != ident and _record.fullmatch(candidate):
+            return track(candidate)
+    raise Error(404, "not_found", "未找到该酷狗录音")
+
+
 def tracks(ids):
     mix_ids = list(dict.fromkeys(ident.split("-")[1] for ident in ids))
     result = {}
@@ -355,12 +379,16 @@ def _https_origin(origin):
         raise Error(503, "kugou_https_required", "酷狗播放需要 HTTPS 服务地址")
 
 
-def resolve(ident, quality, uid, origin, *, room_template=False):
+def resolve(ident, quality, uid, origin, *, room_template=False, allow_hash_lookup=False):
     if quality not in ("auto", *_levels):
         raise Error(400, "invalid_input", "不支持的酷狗音质")
     _https_origin(origin)
     cookie = server_cookie()
-    resource, metadata, audio = track(ident)
+    if allow_hash_lookup:
+        resource, metadata, audio = _lx_track(ident, cookie)
+        ident = resource["id"]
+    else:
+        resource, metadata, audio = track(ident)
     if not resource["durationMs"]:
         raise Error(403, "playback_unavailable", "缺少完整曲目时长")
     variants = _variants(ident, metadata, audio, cookie)

@@ -64,6 +64,31 @@ class KugouGatewayTests(unittest.TestCase):
 
 
 class KugouAdapterTests(unittest.TestCase):
+    def test_lx_track_accepts_only_exact_hash_matches(self):
+        digest = ID.split("-")[0]
+        recording = ({"id": ID}, {}, {})
+        reply = {"data": [
+            {"hash": "b" * 32, "album_audio_id": 456},
+            {"hash": digest.upper(), "album_audio_id": 123},
+        ]}
+
+        def lookup(ident):
+            if ident == ID:
+                return recording
+            raise kg.Error(404, "not_found", "fixture")
+
+        with patch.object(kg, "track", side_effect=lookup) as track, \
+                patch.object(kg, "_api", return_value=reply) as api:
+            self.assertEqual(kg._lx_track(ID, "fixture"), recording)
+            api.assert_not_called()
+            for hint in (digest, digest + "-789"):
+                self.assertEqual(kg._lx_track(hint, "fixture"), recording)
+                track.assert_called_with(ID)
+            api.return_value = {"data": reply["data"][:1]}
+            with self.assertRaises(kg.Error) as err:
+                kg._lx_track(digest, "fixture")
+            self.assertEqual(err.exception.status, 404)
+
     def test_private_cookie_file_can_be_rotated(self):
         with tempfile.TemporaryDirectory() as path, patch.dict(os.environ, {"CM_KUGOU_COOKIE_FILE": path + "/cookie"}):
             cookie = Path(path) / "cookie"
